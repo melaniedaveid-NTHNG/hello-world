@@ -18,213 +18,48 @@
   body {
     font-family: 'Poppins', sans-serif;
     color: #fff;
-    position: relative;
-    overflow: hidden;
   }
-  #bg-canvas {
-    position: fixed;
-    inset: 0;
-    width: 100%;
-    height: 100%;
-    z-index: 0;
-    cursor: crosshair;
+  main {
+    height: 100vh;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
   }
-  .veil {
-    position: fixed;
-    inset: 0;
-    background: radial-gradient(ellipse at center, rgba(0,0,0,0.05) 0%, rgba(0,0,0,0.55) 70%, rgba(0,0,0,0.88) 100%);
-    z-index: 1;
-    pointer-events: none;
+  .hello {
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    font-size: 1.4rem;
+    color: #d8d8d8;
+    margin: 0 0 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
   }
-  .sr-only {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip: rect(0 0 0 0);
-    white-space: nowrap;
+  .hello::before {
+    content: "";
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff5a1f;
+    display: inline-block;
+  }
+  h1 {
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: clamp(3rem, 12vw, 9rem);
+    margin: 0;
+    line-height: 1;
   }
 </style>
 </head>
 <body>
 
-<canvas id="bg-canvas"></canvas>
-<div class="veil"></div>
-<h1 class="sr-only">Hello, my name is Melanie Daveid</h1>
-
-<script>
-(function () {
-  var canvas = document.getElementById('bg-canvas');
-  var ctx = canvas.getContext('2d', { alpha: false });
-
-  // Low-res grid rendered blocky/pixelated, then scaled up — echoes the
-  // glitch-block, high-contrast organic-swirl look of the source recording,
-  // rebuilt from scratch as generative noise rather than the footage itself.
-  var GRID_W = 260, GRID_H = 180;
-  var off = document.createElement('canvas');
-  off.width = GRID_W;
-  off.height = GRID_H;
-  var octx = off.getContext('2d');
-  var imgData = octx.createImageData(GRID_W, GRID_H);
-
-  var mouse = { x: 0.5, y: 0.5, active: false };
-  var burst = 0;
-
-  // The headline is dithered from the same noise field as the background —
-  // "made of" the same generative material instead of sitting flat on top —
-  // while an orange dot floats crisply above it as the one accent color.
-  var textMask = new Uint8Array(GRID_W * GRID_H);
-  var dot = { x: 0, y: 0, r: 0 };
-
-  function buildTextMask() {
-    var tw = canvas.width, th = canvas.height;
-    if (!tw || !th) return;
-    var tCanvas = document.createElement('canvas');
-    tCanvas.width = tw;
-    tCanvas.height = th;
-    var tctx = tCanvas.getContext('2d');
-    tctx.fillStyle = '#fff';
-    tctx.textAlign = 'center';
-    tctx.textBaseline = 'middle';
-
-    var cx = tw / 2, cy = th / 2;
-    var maxWidth = tw * 0.9;
-    var mainSize = Math.max(46, Math.min(tw * 0.16, th * 0.32));
-
-    tctx.font = '600 ' + mainSize + 'px Poppins, sans-serif';
-    var mainWidth = tctx.measureText('Melanie Daveid').width;
-    if (mainWidth > maxWidth) {
-      mainSize *= maxWidth / mainWidth;
-      tctx.font = '600 ' + mainSize + 'px Poppins, sans-serif';
-    }
-
-    var subSize = Math.max(13, mainSize * 0.185);
-    var gap = mainSize * 0.62;
-
-    tctx.font = '300 ' + subSize + 'px Poppins, sans-serif';
-    tctx.fillText('Hello, my name is', cx, cy - gap);
-    var subWidth = tctx.measureText('Hello, my name is').width;
-
-    tctx.font = '600 ' + mainSize + 'px Poppins, sans-serif';
-    tctx.fillText('Melanie Daveid', cx, cy + mainSize * 0.06);
-
-    dot.r = Math.max(3, subSize * 0.18);
-    dot.x = cx - subWidth / 2 - dot.r * 2.4;
-    dot.y = cy - gap;
-
-    var pix = tctx.getImageData(0, 0, tw, th).data;
-    for (var gy = 0; gy < GRID_H; gy++) {
-      var py = Math.min(th - 1, Math.floor(((gy + 0.5) / GRID_H) * th));
-      for (var gx = 0; gx < GRID_W; gx++) {
-        var px = Math.min(tw - 1, Math.floor(((gx + 0.5) / GRID_W) * tw));
-        textMask[gy * GRID_W + gx] = pix[(py * tw + px) * 4 + 3] > 128 ? 1 : 0;
-      }
-    }
-  }
-
-  function resize() {
-    canvas.width = window.innerWidth;
-    canvas.height = window.innerHeight;
-    buildTextMask();
-  }
-  window.addEventListener('resize', resize);
-  resize();
-  if (document.fonts && document.fonts.ready) {
-    document.fonts.ready.then(buildTextMask);
-  }
-
-  function setPointer(clientX, clientY) {
-    mouse.x = clientX / window.innerWidth;
-    mouse.y = clientY / window.innerHeight;
-    mouse.active = true;
-  }
-  window.addEventListener('pointermove', function (e) { setPointer(e.clientX, e.clientY); });
-  window.addEventListener('pointerdown', function (e) { setPointer(e.clientX, e.clientY); burst = 1; });
-  window.addEventListener('pointerleave', function () { mouse.active = false; });
-  window.addEventListener('touchmove', function (e) {
-    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
-  }, { passive: true });
-
-  // Domain-warped, multi-octave sine field — a cheap organic "flow noise".
-  // Extra high-frequency octaves add fine veining on top of the big swirls.
-  function noise(x, y, t) {
-    var wx = x + Math.sin(y * 2.3 + t * 0.15) * 0.6;
-    var wy = y + Math.cos(x * 2.1 - t * 0.12) * 0.6;
-    var v = Math.sin(wx * 3.1 + t * 0.3) * Math.cos(wy * 2.7 - t * 0.25);
-    v += Math.sin((wx + wy) * 4.3 + t * 0.4) * 0.5;
-    v += Math.sin(wx * 7.7 - wy * 5.1 + t * 0.6) * 0.25;
-    v += Math.sin(wx * 13.1 + wy * 9.3 - t * 0.5) * 0.15;
-    v += Math.sin(wx * 22.4 - wy * 18.7 + t * 0.8) * 0.08;
-    v += Math.sin(wx * 37.0 + wy * 31.5 - t * 1.1) * 0.05;
-    return v; // roughly -2.03..2.03
-  }
-
-  // 8x8 Bayer matrix — finer, more precise dither steps (64 levels) than a
-  // 4x4 grid, so mid-tones resolve into a clean halftone gradient.
-  var BAYER = [
-     0, 32,  8, 40,  2, 34, 10, 42,
-    48, 16, 56, 24, 50, 18, 58, 26,
-    12, 44,  4, 36, 14, 46,  6, 38,
-    60, 28, 52, 20, 62, 30, 54, 22,
-     3, 35, 11, 43,  1, 33,  9, 41,
-    51, 19, 59, 27, 49, 17, 57, 25,
-    15, 47,  7, 39, 13, 45,  5, 37,
-    63, 31, 55, 23, 61, 29, 53, 21
-  ].map(function (v) { return (v + 0.5) / 64; });
-
-  function draw(now) {
-    var t = now * 0.001;
-    var data = imgData.data;
-    var mx = mouse.x * GRID_W;
-    var my = mouse.y * GRID_H;
-    var rippleStrength = 1.3 + burst * 2.5;
-
-    for (var gy = 0; gy < GRID_H; gy++) {
-      for (var gx = 0; gx < GRID_W; gx++) {
-        var nx = (gx / GRID_W) * 4;
-        var ny = (gy / GRID_H) * 4;
-
-        var dxm = gx - mx, dym = gy - my;
-        var dist = Math.sqrt(dxm * dxm + dym * dym);
-        var ripple = mouse.active ? Math.sin(dist * 0.18 - t * 3) * Math.max(0, 1 - dist / 34) * rippleStrength : 0;
-
-        var v = noise(nx + ripple * 0.35, ny + ripple * 0.35, t);
-        v = Math.max(0, Math.min(1, (v + 2.03) / 4.06));
-
-        var dith = BAYER[(gy & 7) * 8 + (gx & 7)];
-        var bw2;
-        if (textMask[gy * GRID_W + gx]) {
-          // Same noise, biased bright: the letters stay legible while
-          // still visibly textured/animated by the identical field.
-          var vt = Math.pow(v, 0.5) * 0.82 + 0.18;
-          bw2 = vt > dith * 0.4 ? 255 : 0;
-        } else {
-          var vb = Math.pow(v, 1.7); // darken background: push midtones down
-          bw2 = vb > dith ? 255 : 0;
-        }
-
-        var idx = (gy * GRID_W + gx) * 4;
-        data[idx] = data[idx + 1] = data[idx + 2] = bw2;
-        data[idx + 3] = 255;
-      }
-    }
-
-    burst *= 0.9;
-
-    octx.putImageData(imgData, 0, 0);
-    ctx.imageSmoothingEnabled = false;
-    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
-
-    ctx.fillStyle = '#ff5a1f';
-    ctx.beginPath();
-    ctx.arc(dot.x, dot.y, dot.r, 0, Math.PI * 2);
-    ctx.fill();
-
-    requestAnimationFrame(draw);
-  }
-  requestAnimationFrame(draw);
-})();
-</script>
+<main>
+  <p class="hello">Hello, my name is</p>
+  <h1>Melanie Daveid</h1>
+</main>
 
 </body>
 </html>

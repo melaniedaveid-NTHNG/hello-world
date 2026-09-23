@@ -88,8 +88,17 @@
     tctx.textBaseline = 'middle';
 
     var cx = tw / 2, cy = th / 2;
+    var maxWidth = tw * 0.9;
     var mainSize = Math.max(46, Math.min(tw * 0.16, th * 0.32));
-    var subSize = Math.max(15, mainSize * 0.185);
+
+    tctx.font = '600 ' + mainSize + 'px Poppins, sans-serif';
+    var mainWidth = tctx.measureText('Melanie Daveid').width;
+    if (mainWidth > maxWidth) {
+      mainSize *= maxWidth / mainWidth;
+      tctx.font = '600 ' + mainSize + 'px Poppins, sans-serif';
+    }
+
+    var subSize = Math.max(13, mainSize * 0.185);
     var gap = mainSize * 0.62;
 
     tctx.font = '300 ' + subSize + 'px Poppins, sans-serif';

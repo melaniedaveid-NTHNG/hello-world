@@ -62,7 +62,7 @@
     width: 10px;
     height: 10px;
     border-radius: 50%;
-    background: #ff5a1f;
+    background: #fff;
     display: inline-block;
   }
   h1 {
@@ -131,13 +131,12 @@
     return v; // roughly -1.75..1.75
   }
 
-  function rand(n) { return Math.floor(Math.random() * n); }
-
   function draw(now) {
     var t = now * 0.001;
     var data = imgData.data;
     var mx = mouse.x * GRID_W;
     var my = mouse.y * GRID_H;
+    var rippleStrength = 1.3 + burst * 2.5;
 
     for (var gy = 0; gy < GRID_H; gy++) {
       for (var gx = 0; gx < GRID_W; gx++) {
@@ -146,38 +145,15 @@
 
         var dxm = gx - mx, dym = gy - my;
         var dist = Math.sqrt(dxm * dxm + dym * dym);
-        var ripple = mouse.active ? Math.sin(dist * 0.18 - t * 3) * Math.max(0, 1 - dist / 34) * 1.3 : 0;
+        var ripple = mouse.active ? Math.sin(dist * 0.18 - t * 3) * Math.max(0, 1 - dist / 34) * rippleStrength : 0;
 
         var v = noise(nx + ripple * 0.35, ny + ripple * 0.35, t);
         v = (v + 1.75) / 3.5;
-        var levels = 5;
-        v = Math.round(v * levels) / levels;
-        var gray = Math.max(0, Math.min(255, v * 255));
+        var bw2 = v > 0.5 ? 255 : 0;
 
         var idx = (gy * GRID_W + gx) * 4;
-        data[idx] = data[idx + 1] = data[idx + 2] = gray;
+        data[idx] = data[idx + 1] = data[idx + 2] = bw2;
         data[idx + 3] = 255;
-      }
-    }
-
-    // Glitch blocks: random rectangles inverted or flattened to black/white,
-    // intensified briefly on click/tap.
-    var blockCount = 5 + Math.round(burst * 28);
-    for (var i = 0; i < blockCount; i++) {
-      var bw = 2 + rand(12);
-      var bh = 2 + rand(8);
-      var bx = rand(GRID_W);
-      var by = rand(GRID_H);
-      var mode = rand(3);
-      for (var y = by; y < Math.min(by + bh, GRID_H); y++) {
-        for (var x = bx; x < Math.min(bx + bw, GRID_W); x++) {
-          var di = (y * GRID_W + x) * 4;
-          var val;
-          if (mode === 0) val = 255 - data[di];
-          else if (mode === 1) val = 245;
-          else val = 10;
-          data[di] = data[di + 1] = data[di + 2] = val;
-        }
       }
     }
 

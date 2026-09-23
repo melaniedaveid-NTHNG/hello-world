@@ -21,19 +21,20 @@
     position: relative;
     overflow: hidden;
   }
-  .bg-video {
+  #bg-canvas {
     position: fixed;
     inset: 0;
     width: 100%;
     height: 100%;
-    object-fit: cover;
     z-index: 0;
+    cursor: crosshair;
   }
   .veil {
     position: fixed;
     inset: 0;
-    background: radial-gradient(ellipse at center, rgba(0,0,0,0.25) 0%, rgba(0,0,0,0.7) 70%, rgba(0,0,0,0.9) 100%);
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.2) 0%, rgba(0,0,0,0.65) 70%, rgba(0,0,0,0.9) 100%);
     z-index: 1;
+    pointer-events: none;
   }
   main {
     position: relative;
@@ -44,6 +45,7 @@
     align-items: center;
     justify-content: center;
     text-align: center;
+    pointer-events: none;
   }
   .hello {
     font-weight: 300;
@@ -74,15 +76,122 @@
 </head>
 <body>
 
-<video class="bg-video" autoplay muted loop playsinline>
-  <source src="bg.mp4" type="video/mp4">
-</video>
+<canvas id="bg-canvas"></canvas>
 <div class="veil"></div>
 
 <main>
   <p class="hello">Hello, my name is</p>
   <h1>Melanie Daveid</h1>
 </main>
+
+<script>
+(function () {
+  var canvas = document.getElementById('bg-canvas');
+  var ctx = canvas.getContext('2d', { alpha: false });
+
+  // Low-res grid rendered blocky/pixelated, then scaled up — echoes the
+  // glitch-block, high-contrast organic-swirl look of the source recording,
+  // rebuilt from scratch as generative noise rather than the footage itself.
+  var GRID_W = 130, GRID_H = 90;
+  var off = document.createElement('canvas');
+  off.width = GRID_W;
+  off.height = GRID_H;
+  var octx = off.getContext('2d');
+  var imgData = octx.createImageData(GRID_W, GRID_H);
+
+  var mouse = { x: 0.5, y: 0.5, active: false };
+  var burst = 0;
+
+  function resize() {
+    canvas.width = window.innerWidth;
+    canvas.height = window.innerHeight;
+  }
+  window.addEventListener('resize', resize);
+  resize();
+
+  function setPointer(clientX, clientY) {
+    mouse.x = clientX / window.innerWidth;
+    mouse.y = clientY / window.innerHeight;
+    mouse.active = true;
+  }
+  window.addEventListener('pointermove', function (e) { setPointer(e.clientX, e.clientY); });
+  window.addEventListener('pointerdown', function (e) { setPointer(e.clientX, e.clientY); burst = 1; });
+  window.addEventListener('pointerleave', function () { mouse.active = false; });
+  window.addEventListener('touchmove', function (e) {
+    if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
+  }, { passive: true });
+
+  // Domain-warped layered sine field — a cheap organic "flow noise"
+  function noise(x, y, t) {
+    var wx = x + Math.sin(y * 2.3 + t * 0.15) * 0.6;
+    var wy = y + Math.cos(x * 2.1 - t * 0.12) * 0.6;
+    var v = Math.sin(wx * 3.1 + t * 0.3) * Math.cos(wy * 2.7 - t * 0.25);
+    v += Math.sin((wx + wy) * 4.3 + t * 0.4) * 0.5;
+    v += Math.sin(wx * 7.7 - wy * 5.1 + t * 0.6) * 0.25;
+    return v; // roughly -1.75..1.75
+  }
+
+  function rand(n) { return Math.floor(Math.random() * n); }
+
+  function draw(now) {
+    var t = now * 0.001;
+    var data = imgData.data;
+    var mx = mouse.x * GRID_W;
+    var my = mouse.y * GRID_H;
+
+    for (var gy = 0; gy < GRID_H; gy++) {
+      for (var gx = 0; gx < GRID_W; gx++) {
+        var nx = (gx / GRID_W) * 4;
+        var ny = (gy / GRID_H) * 4;
+
+        var dxm = gx - mx, dym = gy - my;
+        var dist = Math.sqrt(dxm * dxm + dym * dym);
+        var ripple = mouse.active ? Math.sin(dist * 0.18 - t * 3) * Math.max(0, 1 - dist / 34) * 1.3 : 0;
+
+        var v = noise(nx + ripple * 0.35, ny + ripple * 0.35, t);
+        v = (v + 1.75) / 3.5;
+        var levels = 5;
+        v = Math.round(v * levels) / levels;
+        var gray = Math.max(0, Math.min(255, v * 255));
+
+        var idx = (gy * GRID_W + gx) * 4;
+        data[idx] = data[idx + 1] = data[idx + 2] = gray;
+        data[idx + 3] = 255;
+      }
+    }
+
+    // Glitch blocks: random rectangles inverted or flattened to black/white,
+    // intensified briefly on click/tap.
+    var blockCount = 5 + Math.round(burst * 28);
+    for (var i = 0; i < blockCount; i++) {
+      var bw = 2 + rand(12);
+      var bh = 2 + rand(8);
+      var bx = rand(GRID_W);
+      var by = rand(GRID_H);
+      var mode = rand(3);
+      for (var y = by; y < Math.min(by + bh, GRID_H); y++) {
+        for (var x = bx; x < Math.min(bx + bw, GRID_W); x++) {
+          var di = (y * GRID_W + x) * 4;
+          var val;
+          if (mode === 0) val = 255 - data[di];
+          else if (mode === 1) val = 245;
+          else val = 10;
+          data[di] = data[di + 1] = data[di + 2] = val;
+        }
+      }
+    }
+
+    burst *= 0.9;
+
+    octx.putImageData(imgData, 0, 0);
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(off, 0, 0, canvas.width, canvas.height);
+
+    requestAnimationFrame(draw);
+  }
+  requestAnimationFrame(draw);
+})();
+</script>
 
 </body>
 </html>

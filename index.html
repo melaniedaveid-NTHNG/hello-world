@@ -121,15 +121,25 @@
     if (e.touches[0]) setPointer(e.touches[0].clientX, e.touches[0].clientY);
   }, { passive: true });
 
-  // Domain-warped layered sine field — a cheap organic "flow noise"
+  // Domain-warped, multi-octave sine field — a cheap organic "flow noise".
+  // Extra high-frequency octaves add fine veining on top of the big swirls.
   function noise(x, y, t) {
     var wx = x + Math.sin(y * 2.3 + t * 0.15) * 0.6;
     var wy = y + Math.cos(x * 2.1 - t * 0.12) * 0.6;
     var v = Math.sin(wx * 3.1 + t * 0.3) * Math.cos(wy * 2.7 - t * 0.25);
     v += Math.sin((wx + wy) * 4.3 + t * 0.4) * 0.5;
     v += Math.sin(wx * 7.7 - wy * 5.1 + t * 0.6) * 0.25;
-    return v; // roughly -1.75..1.75
+    v += Math.sin(wx * 13.1 + wy * 9.3 - t * 0.5) * 0.15;
+    v += Math.sin(wx * 22.4 - wy * 18.7 + t * 0.8) * 0.08;
+    v += Math.sin(wx * 37.0 + wy * 31.5 - t * 1.1) * 0.05;
+    return v; // roughly -2.03..2.03
   }
+
+  // 4x4 Bayer matrix, so mid-tones dither into fine textured patterns
+  // instead of flattening to solid blocks.
+  var BAYER = [0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5].map(function (v) {
+    return (v + 0.5) / 16;
+  });
 
   function draw(now) {
     var t = now * 0.001;
@@ -148,8 +158,9 @@
         var ripple = mouse.active ? Math.sin(dist * 0.18 - t * 3) * Math.max(0, 1 - dist / 34) * rippleStrength : 0;
 
         var v = noise(nx + ripple * 0.35, ny + ripple * 0.35, t);
-        v = (v + 1.75) / 3.5;
-        var bw2 = v > 0.5 ? 255 : 0;
+        v = (v + 2.03) / 4.06;
+        var dith = BAYER[(gy & 3) * 4 + (gx & 3)];
+        var bw2 = v > dith ? 255 : 0;
 
         var idx = (gy * GRID_W + gx) * 4;
         data[idx] = data[idx + 1] = data[idx + 2] = bw2;

@@ -3,31 +3,97 @@
 <head>
 <meta charset="UTF-8">
 <title>Hello</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Poppins:wght@300;400;600&display=swap" rel="stylesheet">
 <style>
-  body {
-    background: black;
-    color: white;
-    height: 100vh;
+  :root {
+    color-scheme: dark;
+  }
+  html, body {
+    height: 100%;
     margin: 0;
+    background: #000;
+    overflow: hidden;
+  }
+  body {
+    font-family: 'Poppins', sans-serif;
+    color: #fff;
+    position: relative;
+  }
+  .smoke {
+    position: fixed;
+    inset: -10%;
+    width: 120%;
+    height: 120%;
+    filter: url(#smoke-filter) brightness(0.55) contrast(1.15);
+    background: #888;
+  }
+  .veil {
+    position: fixed;
+    inset: 0;
+    background: radial-gradient(ellipse at center, rgba(0,0,0,0.15) 0%, rgba(0,0,0,0.75) 75%, rgba(0,0,0,0.95) 100%);
+  }
+  main {
+    position: relative;
+    z-index: 1;
+    height: 100vh;
     display: flex;
+    flex-direction: column;
     align-items: center;
     justify-content: center;
     text-align: center;
   }
-  p {
-    font-size: 1.5rem;
-    margin: 0;
+  .hello {
+    font-weight: 300;
+    letter-spacing: 0.05em;
+    font-size: 1.4rem;
+    color: #d8d8d8;
+    margin: 0 0 0.5rem;
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+  }
+  .hello::before {
+    content: "";
+    width: 10px;
+    height: 10px;
+    border-radius: 50%;
+    background: #ff5a1f;
+    display: inline-block;
   }
   h1 {
-    font-size: 7rem;
+    font-weight: 600;
+    letter-spacing: -0.02em;
+    font-size: clamp(3rem, 12vw, 9rem);
     margin: 0;
+    line-height: 1;
   }
 </style>
 </head>
 <body>
-<div>
-  <p>Hello, my name is</p>
+
+<svg width="0" height="0">
+  <filter id="smoke-filter">
+    <feTurbulence type="fractalNoise" numOctaves="4" seed="7" result="noise">
+      <animate attributeName="baseFrequency" dur="60s" values="0.008 0.02;0.014 0.03;0.008 0.02" repeatCount="indefinite" />
+    </feTurbulence>
+    <feColorMatrix in="noise" type="saturate" values="0" />
+    <feComponentTransfer>
+      <feFuncA type="gamma" exponent="2.2" amplitude="1" offset="0" />
+    </feComponentTransfer>
+    <feComposite operator="in" in2="SourceGraphic" />
+    <feGaussianBlur stdDeviation="1.2" />
+  </filter>
+</svg>
+
+<div class="smoke"></div>
+<div class="veil"></div>
+
+<main>
+  <p class="hello">Hello, my name is</p>
   <h1>Melanie Daveid</h1>
-</div>
+</main>
+
 </body>
 </html>

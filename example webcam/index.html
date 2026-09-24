@@ -116,6 +116,7 @@
   }
   #dither-settings,
   #freeze-settings,
+  #kaleido-settings,
   #paint-settings,
   #shapes-settings,
   #stripe-panel {
@@ -130,6 +131,7 @@
   }
   #dither-settings.visible,
   #freeze-settings.visible,
+  #kaleido-settings.visible,
   #paint-settings.visible,
   #shapes-settings.visible,
   #stripe-panel { display: flex; }
@@ -204,6 +206,7 @@
     <button id="mirror" class="active">Mirror</button>
     <button id="freeze">Freeze</button>
     <button id="paint">Paint</button>
+    <button id="kaleido-toggle">Kaleidoscope</button>
     <button id="shapes-toggle">3D Shapes</button>
     <button id="fullscreen">Fullscreen</button>
   </div>
@@ -222,6 +225,44 @@
     </div>
     <p style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
       Click the video to re-capture the frozen frame.
+    </p>
+  </div>
+
+  <div id="kaleido-settings">
+    <div class="setting-row">
+      <label for="kaleido-segments">Segments</label>
+      <input type="range" id="kaleido-segments" min="2" max="24" step="1" value="6">
+      <span class="value" id="kaleido-segments-value">6</span>
+    </div>
+    <div class="setting-row">
+      <label for="kaleido-rotation">Rotation</label>
+      <input type="range" id="kaleido-rotation" min="0" max="360" step="1" value="0">
+      <span class="value" id="kaleido-rotation-value">0°</span>
+    </div>
+    <div class="setting-row">
+      <label for="kaleido-zoom">Zoom</label>
+      <input type="range" id="kaleido-zoom" min="50" max="300" step="5" value="100">
+      <span class="value" id="kaleido-zoom-value">100%</span>
+    </div>
+    <div id="kaleido-tool-row" style="display: flex; gap: 0.5rem; width: 100%;">
+      <button id="kaleido-mirror" class="active" type="button" style="flex: 1;">Mirror</button>
+      <button id="kaleido-auto" type="button" style="flex: 1;">Auto-rotate</button>
+    </div>
+    <div class="setting-row" id="kaleido-speed-row" style="display: none;">
+      <label for="kaleido-speed">Speed</label>
+      <input type="range" id="kaleido-speed" min="1" max="100" step="1" value="20">
+      <span class="value" id="kaleido-speed-value">20</span>
+    </div>
+    <div class="setting-row" id="kaleido-direction-row" style="display: none;">
+      <label>Direction</label>
+      <div class="pill-group" id="kaleido-direction-group">
+        <button data-dir="1" class="active" type="button">CW</button>
+        <button data-dir="-1" type="button">CCW</button>
+      </div>
+    </div>
+    <button id="kaleido-reset" type="button">Reset</button>
+    <p style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
+      Drag the video to move the kaleidoscope center.
     </p>
   </div>
 
@@ -382,6 +423,22 @@
   var freezeSettings = document.getElementById('freeze-settings');
   var freezeRadiusInput = document.getElementById('freeze-radius');
   var freezeRadiusValue = document.getElementById('freeze-radius-value');
+  var kaleidoToggleBtn = document.getElementById('kaleido-toggle');
+  var kaleidoSettings = document.getElementById('kaleido-settings');
+  var kaleidoSegmentsInput = document.getElementById('kaleido-segments');
+  var kaleidoSegmentsValue = document.getElementById('kaleido-segments-value');
+  var kaleidoRotationInput = document.getElementById('kaleido-rotation');
+  var kaleidoRotationValue = document.getElementById('kaleido-rotation-value');
+  var kaleidoZoomInput = document.getElementById('kaleido-zoom');
+  var kaleidoZoomValue = document.getElementById('kaleido-zoom-value');
+  var kaleidoMirrorBtn = document.getElementById('kaleido-mirror');
+  var kaleidoAutoBtn = document.getElementById('kaleido-auto');
+  var kaleidoSpeedRow = document.getElementById('kaleido-speed-row');
+  var kaleidoSpeedInput = document.getElementById('kaleido-speed');
+  var kaleidoSpeedValue = document.getElementById('kaleido-speed-value');
+  var kaleidoDirectionRow = document.getElementById('kaleido-direction-row');
+  var kaleidoDirectionGroup = document.getElementById('kaleido-direction-group');
+  var kaleidoResetBtn = document.getElementById('kaleido-reset');
   var paintBtn = document.getElementById('paint');
   var paintSettings = document.getElementById('paint-settings');
   var paintModeGroup = document.getElementById('paint-mode-group');
@@ -441,6 +498,27 @@
   var freezeCanvas = document.createElement('canvas');
   var freezeCtx = freezeCanvas.getContext('2d');
   var hasFreezeFrame = false;
+
+  // Kaleidoscope: extracts one wedge of the current frame (with zoom
+  // applied) as a "seed" tile, then stamps rotated (and, alternately,
+  // mirrored) copies of that seed around a center point to fill the whole
+  // canvas — the classic one-source-wedge kaleidoscope construction.
+  var kaleidoActive = false;
+  var kaleidoDragging = false;
+  var kaleido = {
+    segments: 6,
+    rotationDeg: 0,
+    zoom: 1,
+    mirror: true,
+    cx: null, cy: null, // null = use canvas center
+    autoRotate: false,
+    autoSpeed: 20,
+    autoDir: 1,
+    autoAngle: 0,
+    lastTime: 0
+  };
+  var kaleidoSeedCanvas = document.createElement('canvas');
+  var kaleidoSeedCtx = kaleidoSeedCanvas.getContext('2d');
 
   // Paint mask: a persistent alpha layer the user paints/erases with a soft
   // round brush. Each frame, a pixelated or blurred version of the whole
@@ -648,6 +726,137 @@
     freezeRadiusValue.textContent = freezeRadiusInput.value;
   });
 
+  kaleidoToggleBtn.addEventListener('click', function () {
+    kaleidoActive = !kaleidoActive;
+    kaleidoToggleBtn.classList.toggle('active', kaleidoActive);
+    kaleidoSettings.classList.toggle('visible', kaleidoActive);
+  });
+  kaleidoSegmentsInput.addEventListener('input', function () {
+    kaleido.segments = parseInt(kaleidoSegmentsInput.value, 10);
+    kaleidoSegmentsValue.textContent = kaleidoSegmentsInput.value;
+  });
+  kaleidoRotationInput.addEventListener('input', function () {
+    kaleido.rotationDeg = parseInt(kaleidoRotationInput.value, 10);
+    kaleidoRotationValue.textContent = kaleidoRotationInput.value + '°';
+  });
+  kaleidoZoomInput.addEventListener('input', function () {
+    kaleido.zoom = parseInt(kaleidoZoomInput.value, 10) / 100;
+    kaleidoZoomValue.textContent = kaleidoZoomInput.value + '%';
+  });
+  kaleidoMirrorBtn.addEventListener('click', function () {
+    kaleido.mirror = !kaleido.mirror;
+    kaleidoMirrorBtn.classList.toggle('active', kaleido.mirror);
+  });
+  kaleidoAutoBtn.addEventListener('click', function () {
+    kaleido.autoRotate = !kaleido.autoRotate;
+    kaleidoAutoBtn.classList.toggle('active', kaleido.autoRotate);
+    kaleidoSpeedRow.style.display = kaleido.autoRotate ? '' : 'none';
+    kaleidoDirectionRow.style.display = kaleido.autoRotate ? '' : 'none';
+  });
+  kaleidoSpeedInput.addEventListener('input', function () {
+    kaleido.autoSpeed = parseInt(kaleidoSpeedInput.value, 10);
+    kaleidoSpeedValue.textContent = kaleidoSpeedInput.value;
+  });
+  kaleidoDirectionGroup.querySelectorAll('button[data-dir]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      kaleidoDirectionGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      kaleido.autoDir = parseInt(btn.dataset.dir, 10);
+    });
+  });
+  kaleidoResetBtn.addEventListener('click', function () {
+    kaleido.segments = 6;
+    kaleido.rotationDeg = 0;
+    kaleido.zoom = 1;
+    kaleido.mirror = true;
+    kaleido.cx = null;
+    kaleido.cy = null;
+    kaleido.autoRotate = false;
+    kaleido.autoSpeed = 20;
+    kaleido.autoDir = 1;
+    kaleido.autoAngle = 0;
+    kaleidoSegmentsInput.value = 6; kaleidoSegmentsValue.textContent = '6';
+    kaleidoRotationInput.value = 0; kaleidoRotationValue.textContent = '0°';
+    kaleidoZoomInput.value = 100; kaleidoZoomValue.textContent = '100%';
+    kaleidoMirrorBtn.classList.add('active');
+    kaleidoAutoBtn.classList.remove('active');
+    kaleidoSpeedRow.style.display = 'none';
+    kaleidoDirectionRow.style.display = 'none';
+    kaleidoSpeedInput.value = 20; kaleidoSpeedValue.textContent = '20';
+    kaleidoDirectionGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+    kaleidoDirectionGroup.querySelector('[data-dir="1"]').classList.add('active');
+  });
+
+  // Dragging the video repositions the kaleidoscope center, unless the
+  // paint tool is active (painting takes priority for the same drag).
+  canvas.addEventListener('pointerdown', function (e) {
+    if (paintActive || !kaleidoActive) return;
+    updateCursorFromEvent(e.clientX, e.clientY);
+    kaleidoDragging = true;
+    kaleido.cx = cursor.x;
+    kaleido.cy = cursor.y;
+  });
+  window.addEventListener('pointerup', function () { kaleidoDragging = false; });
+
+  // Extracts one wedge of the current frame as a seed tile, then stamps
+  // rotated (and, alternately, mirrored) copies of it around the center
+  // point to rebuild the whole canvas as a radial mirrored pattern.
+  function applyKaleidoscope(now) {
+    var w = canvas.width, h = canvas.height;
+    var cx = kaleido.cx === null ? w / 2 : kaleido.cx;
+    var cy = kaleido.cy === null ? h / 2 : kaleido.cy;
+    var segCount = Math.max(2, kaleido.segments);
+    var segAngle = (Math.PI * 2) / segCount;
+    var radius = Math.sqrt(w * w + h * h);
+
+    var deltaSeconds = kaleido.lastTime ? Math.min(0.1, (now - kaleido.lastTime) / 1000) : 0;
+    kaleido.lastTime = now;
+    if (kaleido.autoRotate) {
+      kaleido.autoAngle += kaleido.autoDir * (kaleido.autoSpeed / 50) * 1.5 * deltaSeconds;
+    }
+
+    kaleidoSeedCanvas.width = w;
+    kaleidoSeedCanvas.height = h;
+    kaleidoSeedCtx.clearRect(0, 0, w, h);
+    kaleidoSeedCtx.save();
+    kaleidoSeedCtx.beginPath();
+    kaleidoSeedCtx.moveTo(cx, cy);
+    kaleidoSeedCtx.arc(cx, cy, radius, -segAngle / 2, segAngle / 2);
+    kaleidoSeedCtx.closePath();
+    kaleidoSeedCtx.clip();
+    kaleidoSeedCtx.translate(cx, cy);
+    kaleidoSeedCtx.scale(kaleido.zoom, kaleido.zoom);
+    kaleidoSeedCtx.translate(-cx, -cy);
+    kaleidoSeedCtx.drawImage(canvas, 0, 0);
+    kaleidoSeedCtx.restore();
+
+    var totalRotation = (kaleido.rotationDeg * Math.PI) / 180 + kaleido.autoAngle;
+
+    ctx.save();
+    ctx.fillStyle = '#000';
+    ctx.fillRect(0, 0, w, h);
+    for (var i = 0; i < segCount; i++) {
+      ctx.save();
+      ctx.translate(cx, cy);
+      ctx.rotate(totalRotation + i * segAngle);
+      ctx.translate(-cx, -cy);
+      if (kaleido.mirror && i % 2 === 1) {
+        ctx.translate(cx, cy);
+        ctx.scale(-1, 1);
+        ctx.translate(-cx, -cy);
+      }
+      ctx.drawImage(kaleidoSeedCanvas, 0, 0);
+      ctx.restore();
+    }
+    ctx.restore();
+
+    ctx.beginPath();
+    ctx.arc(cx, cy, 6, 0, Math.PI * 2);
+    ctx.strokeStyle = 'rgba(255,255,255,0.7)';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+  }
+
   paintBtn.addEventListener('click', function () {
     paintActive = !paintActive;
     paintBtn.classList.toggle('active', paintActive);
@@ -847,12 +1056,14 @@
   canvas.addEventListener('mousemove', function (e) {
     updateCursorFromEvent(e.clientX, e.clientY);
     if (isPainting && paintActive) paintStroke();
+    else if (kaleidoDragging) { kaleido.cx = cursor.x; kaleido.cy = cursor.y; }
   });
   canvas.addEventListener('mouseleave', function () { cursor.active = false; });
   canvas.addEventListener('touchmove', function (e) {
     if (e.touches[0]) {
       updateCursorFromEvent(e.touches[0].clientX, e.touches[0].clientY);
       if (isPainting && paintActive) paintStroke();
+      else if (kaleidoDragging) { kaleido.cx = cursor.x; kaleido.cy = cursor.y; }
     }
   }, { passive: true });
   canvas.addEventListener('click', function () {
@@ -1228,6 +1439,10 @@
       applyEffect(frame);
       ctx.putImageData(frame, 0, 0);
     }
+
+    // Pipeline order: camera filters -> kaleidoscope -> paint mask -> 3D
+    // shapes (rendered at the end of draw, texturing from this canvas).
+    if (kaleidoActive) applyKaleidoscope(now);
 
     if (hasMaskContent) applyPaintMask();
     if (paintActive && cursor.active) {

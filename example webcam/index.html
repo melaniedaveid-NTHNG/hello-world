@@ -334,6 +334,24 @@
       <input type="range" id="shape-pulse" min="0" max="100" step="1" value="30">
       <span class="value" id="shape-pulse-value">30</span>
     </div>
+    <div class="setting-row">
+      <label>Render</label>
+      <div class="pill-group" id="shape-render-group">
+        <button data-render="solid" class="active" type="button">Solid</button>
+        <button data-render="particles" type="button">Particles</button>
+      </div>
+    </div>
+    <div class="setting-row" id="shape-point-size-row" style="display: none;">
+      <label for="shape-point-size">Point size</label>
+      <input type="range" id="shape-point-size" min="2" max="24" step="1" value="6">
+      <span class="value" id="shape-point-size-value">6</span>
+    </div>
+    <button id="depth-map-toggle" class="active" type="button">Video Depth Map</button>
+    <div class="setting-row" id="depth-amount-row">
+      <label for="depth-amount">Depth amount</label>
+      <input type="range" id="depth-amount" min="0" max="100" step="5" value="60">
+      <span class="value" id="depth-amount-value">60</span>
+    </div>
     <button id="shape-randomize" type="button">Randomize spread</button>
     <p id="shapes-status" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
       Drag the video to rotate the shapes.
@@ -513,6 +531,13 @@
   var shapeRotationSpeedValue = document.getElementById('shape-rotation-speed-value');
   var shapePulseInput = document.getElementById('shape-pulse');
   var shapePulseValue = document.getElementById('shape-pulse-value');
+  var shapeRenderGroup = document.getElementById('shape-render-group');
+  var shapePointSizeRow = document.getElementById('shape-point-size-row');
+  var shapePointSizeInput = document.getElementById('shape-point-size');
+  var shapePointSizeValue = document.getElementById('shape-point-size-value');
+  var depthMapToggleBtn = document.getElementById('depth-map-toggle');
+  var depthAmountInput = document.getElementById('depth-amount');
+  var depthAmountValue = document.getElementById('depth-amount-value');
   var shapeRandomizeBtn = document.getElementById('shape-randomize');
   var shapesStatus = document.getElementById('shapes-status');
   var handTrackingToggleBtn = document.getElementById('hand-tracking-toggle');
@@ -621,6 +646,10 @@
   var shapePulse = 0.3; // base scale-pulse depth, 0-1
   var handTrackingActive = false;
   var handMoveRange = 0.5;
+  var shapeRenderStyle = 'solid'; // 'solid' | 'particles'
+  var shapePointSize = 6;
+  var depthMapActive = true;
+  var depthAmount = 0.6;
   var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
 
   // Audio reactivity: a Web Audio AnalyserNode sampled every frame drives
@@ -707,8 +736,21 @@
       var sizeMul = 0.6 + Math.random() * 1.0;
       var size = baseSize * sizeMul;
       var geometry = buildOrganicGeometry(shapeType, size);
-      var material = new THREE.MeshBasicMaterial({ map: t.texture });
-      var mesh = new THREE.Mesh(geometry, material);
+      var vertexCount = geometry.attributes.position.count;
+
+      var mesh;
+      if (shapeRenderStyle === 'particles') {
+        var colors = new Float32Array(vertexCount * 3).fill(1);
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+        var pointsMaterial = new THREE.PointsMaterial({
+          size: shapePointSize, vertexColors: true, transparent: true, opacity: 0.9, sizeAttenuation: true
+        });
+        mesh = new THREE.Points(geometry, pointsMaterial);
+      } else {
+        var meshMaterial = new THREE.MeshBasicMaterial({ map: t.texture });
+        mesh = new THREE.Mesh(geometry, meshMaterial);
+      }
+
       var angle = Math.random() * Math.PI * 2;
       var radiusFrac = Math.sqrt(Math.random());
       mesh.position.set(
@@ -717,8 +759,10 @@
         (Math.random() - 0.5) * baseSize * 0.4
       );
       mesh.userData.basePositions = new Float32Array(geometry.attributes.position.array);
+      mesh.userData.uvs = geometry.attributes.uv.array;
       mesh.userData.noiseSeed = Math.random() * 1000;
       mesh.userData.noiseAmount = size * 0.16;
+      mesh.userData.depthScale = size * 0.5;
       t.group.add(mesh);
     }
   }
@@ -765,6 +809,15 @@
     t.group.position.x += (targetX - t.group.position.x) * 0.15;
     t.group.position.y += (targetY - t.group.position.y) * 0.15;
 
+    // One readback of the current frame per animation frame (not per shape)
+    // — needed whenever vertices displace by brightness (Depth map) or
+    // particles sample their color from the video.
+    var videoDepthData = null;
+    var depthW = canvas.width, depthH = canvas.height;
+    if (depthMapActive || shapeRenderStyle === 'particles') {
+      videoDepthData = ctx.getImageData(0, 0, depthW, depthH).data;
+    }
+
     for (var i = 0; i < t.group.children.length; i++) {
       var mesh = t.group.children[i];
       mesh.rotation.y = ry;
@@ -776,15 +829,42 @@
 
       var base = mesh.userData.basePositions;
       var amount = mesh.userData.noiseAmount;
+      var depthScale = mesh.userData.depthScale;
+      var uvs = mesh.userData.uvs;
       var pos = mesh.geometry.attributes.position;
+      var colorAttr = mesh.isPoints ? mesh.geometry.attributes.color : null;
       for (var v = 0; v < pos.count; v++) {
         var ix = v * 3;
         var bx = base[ix], by = base[ix + 1], bz = base[ix + 2];
         var len = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
         var n = organicNoise(bx, by, bz, seed, timeSeconds) * amount;
+
+        if (videoDepthData) {
+          // The video itself is the depth map: sample the pixel this vertex's
+          // UV lands on and push the vertex outward along its own normal in
+          // proportion to brightness — bright/lit parts of frame extrude the
+          // surface further, so the geometry reads as extending toward the
+          // camera like a field of particles rather than a flat wrap.
+          var u = uvs[v * 2], vv = uvs[v * 2 + 1];
+          var px = Math.min(depthW - 1, Math.max(0, (u * depthW) | 0));
+          var py = Math.min(depthH - 1, Math.max(0, ((1 - vv) * depthH) | 0));
+          var pidx = (py * depthW + px) * 4;
+          var r = videoDepthData[pidx], g = videoDepthData[pidx + 1], b = videoDepthData[pidx + 2];
+          if (depthMapActive) {
+            var brightness = (r + g + b) / 765;
+            n += brightness * depthScale * depthAmount;
+          }
+          if (colorAttr) {
+            colorAttr.array[ix] = r / 255;
+            colorAttr.array[ix + 1] = g / 255;
+            colorAttr.array[ix + 2] = b / 255;
+          }
+        }
+
         pos.setXYZ(v, bx + (bx / len) * n, by + (by / len) * n, bz + (bz / len) * n);
       }
       pos.needsUpdate = true;
+      if (colorAttr) colorAttr.needsUpdate = true;
     }
     t.renderer.render(t.scene, t.camera);
   }
@@ -1143,6 +1223,35 @@
   shapePulseInput.addEventListener('input', function () {
     shapePulse = parseInt(shapePulseInput.value, 10) / 100;
     shapePulseValue.textContent = shapePulseInput.value;
+  });
+  shapeRenderGroup.querySelectorAll('button[data-render]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      shapeRenderGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      shapeRenderStyle = btn.dataset.render;
+      shapePointSizeRow.style.display = shapeRenderStyle === 'particles' ? '' : 'none';
+      if (shapesActive) rebuildShapes();
+    });
+  });
+  shapePointSizeInput.addEventListener('input', function () {
+    shapePointSize = parseInt(shapePointSizeInput.value, 10);
+    shapePointSizeValue.textContent = shapePointSizeInput.value;
+    // Live-update existing point materials directly — no need to rebuild
+    // geometry just to change how big each point renders.
+    if (three) {
+      for (var i = 0; i < three.group.children.length; i++) {
+        var mesh = three.group.children[i];
+        if (mesh.isPoints) mesh.material.size = shapePointSize;
+      }
+    }
+  });
+  depthMapToggleBtn.addEventListener('click', function () {
+    depthMapActive = !depthMapActive;
+    depthMapToggleBtn.classList.toggle('active', depthMapActive);
+  });
+  depthAmountInput.addEventListener('input', function () {
+    depthAmount = parseInt(depthAmountInput.value, 10) / 100;
+    depthAmountValue.textContent = depthAmountInput.value;
   });
   shapeRandomizeBtn.addEventListener('click', function () {
     if (shapesActive) rebuildShapes();

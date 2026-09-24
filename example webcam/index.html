@@ -114,6 +114,7 @@
   }
   #dither-settings,
   #freeze-settings,
+  #paint-settings,
   #stripe-panel {
     display: none;
     flex-direction: column;
@@ -126,6 +127,7 @@
   }
   #dither-settings.visible,
   #freeze-settings.visible,
+  #paint-settings.visible,
   #stripe-panel { display: flex; }
   .section-title {
     font-size: 0.85rem;
@@ -197,6 +199,7 @@
   <div id="tool-row">
     <button id="mirror" class="active">Mirror</button>
     <button id="freeze">Freeze</button>
+    <button id="paint">Paint</button>
     <button id="fullscreen">Fullscreen</button>
   </div>
 
@@ -215,6 +218,35 @@
     <p style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
       Click the video to re-capture the frozen frame.
     </p>
+  </div>
+
+  <div id="paint-settings">
+    <div class="setting-row">
+      <label>Mode</label>
+      <div class="pill-group" id="paint-mode-group">
+        <button data-paint-mode="pixelate" class="active" type="button">Pixelate</button>
+        <button data-paint-mode="blur" type="button">Blur</button>
+      </div>
+    </div>
+    <div class="setting-row">
+      <label for="brush-size">Brush size</label>
+      <input type="range" id="brush-size" min="10" max="150" step="5" value="45">
+      <span class="value" id="brush-size-value">45</span>
+    </div>
+    <div class="setting-row" id="pixel-strength-row">
+      <label for="pixel-strength">Pixel size</label>
+      <input type="range" id="pixel-strength" min="3" max="40" step="1" value="12">
+      <span class="value" id="pixel-strength-value">12</span>
+    </div>
+    <div class="setting-row" id="blur-strength-row" style="display: none;">
+      <label for="blur-strength">Blur strength</label>
+      <input type="range" id="blur-strength" min="2" max="30" step="1" value="8">
+      <span class="value" id="blur-strength-value">8</span>
+    </div>
+    <div id="paint-tool-row" style="display: flex; gap: 0.5rem; width: 100%;">
+      <button id="eraser" type="button" style="flex: 1;">Eraser</button>
+      <button id="clear-paint" type="button" style="flex: 1;">Clear all</button>
+    </div>
   </div>
 
   <div id="dither-settings">
@@ -309,6 +341,19 @@
   var freezeSettings = document.getElementById('freeze-settings');
   var freezeRadiusInput = document.getElementById('freeze-radius');
   var freezeRadiusValue = document.getElementById('freeze-radius-value');
+  var paintBtn = document.getElementById('paint');
+  var paintSettings = document.getElementById('paint-settings');
+  var paintModeGroup = document.getElementById('paint-mode-group');
+  var brushSizeInput = document.getElementById('brush-size');
+  var brushSizeValue = document.getElementById('brush-size-value');
+  var pixelStrengthRow = document.getElementById('pixel-strength-row');
+  var pixelStrengthInput = document.getElementById('pixel-strength');
+  var pixelStrengthValue = document.getElementById('pixel-strength-value');
+  var blurStrengthRow = document.getElementById('blur-strength-row');
+  var blurStrengthInput = document.getElementById('blur-strength');
+  var blurStrengthValue = document.getElementById('blur-strength-value');
+  var eraserBtn = document.getElementById('eraser');
+  var clearPaintBtn = document.getElementById('clear-paint');
   var zoomInput = document.getElementById('zoom');
   var zoomValue = document.getElementById('zoom-value');
   var ditherSettings = document.getElementById('dither-settings');
@@ -342,6 +387,29 @@
   var freezeCanvas = document.createElement('canvas');
   var freezeCtx = freezeCanvas.getContext('2d');
   var hasFreezeFrame = false;
+
+  // Paint mask: a persistent alpha layer the user paints/erases with a soft
+  // round brush. Each frame, a pixelated or blurred version of the whole
+  // live frame is masked down to just the painted alpha and composited back
+  // on top — so painted regions stay pixelated/blurred continuously while
+  // the video keeps playing underneath, and unpainted regions are untouched.
+  var paintActive = false;
+  var paintMode = 'pixelate';
+  var brushSize = 45;
+  var pixelStrength = 12;
+  var blurStrength = 8;
+  var eraserActive = false;
+  var hasMaskContent = false;
+  var isPainting = false;
+  var lastPaintPos = null;
+  var maskCanvas = document.createElement('canvas');
+  var maskCtx = maskCanvas.getContext('2d');
+  var transformCanvas = document.createElement('canvas');
+  var transformCtx = transformCanvas.getContext('2d');
+  var paintedCanvas = document.createElement('canvas');
+  var paintedCtx = paintedCanvas.getContext('2d');
+  var smallCanvas = document.createElement('canvas');
+  var smallCtx = smallCanvas.getContext('2d');
 
   var sequence = {
     active: false,
@@ -427,6 +495,113 @@
     freezeRadiusValue.textContent = freezeRadiusInput.value;
   });
 
+  paintBtn.addEventListener('click', function () {
+    paintActive = !paintActive;
+    paintBtn.classList.toggle('active', paintActive);
+    paintSettings.classList.toggle('visible', paintActive);
+    if (!paintActive) { isPainting = false; lastPaintPos = null; }
+  });
+  paintModeGroup.querySelectorAll('button[data-paint-mode]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      paintModeGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      paintMode = btn.dataset.paintMode;
+      pixelStrengthRow.style.display = paintMode === 'pixelate' ? '' : 'none';
+      blurStrengthRow.style.display = paintMode === 'blur' ? '' : 'none';
+    });
+  });
+  brushSizeInput.addEventListener('input', function () {
+    brushSize = parseInt(brushSizeInput.value, 10);
+    brushSizeValue.textContent = brushSizeInput.value;
+  });
+  pixelStrengthInput.addEventListener('input', function () {
+    pixelStrength = parseInt(pixelStrengthInput.value, 10);
+    pixelStrengthValue.textContent = pixelStrengthInput.value;
+  });
+  blurStrengthInput.addEventListener('input', function () {
+    blurStrength = parseInt(blurStrengthInput.value, 10);
+    blurStrengthValue.textContent = blurStrengthInput.value;
+  });
+  eraserBtn.addEventListener('click', function () {
+    eraserActive = !eraserActive;
+    eraserBtn.classList.toggle('active', eraserActive);
+  });
+  clearPaintBtn.addEventListener('click', function () {
+    maskCtx.clearRect(0, 0, maskCanvas.width, maskCanvas.height);
+    hasMaskContent = false;
+  });
+
+  // Soft round brush: a radial gradient stamp so painted edges feather
+  // rather than cutting off hard. Eraser uses destination-out to punch
+  // holes in the same mask instead of painting a second one.
+  function paintStamp(x, y) {
+    maskCtx.globalCompositeOperation = eraserActive ? 'destination-out' : 'source-over';
+    var r = brushSize / 2;
+    var grad = maskCtx.createRadialGradient(x, y, 0, x, y, r);
+    grad.addColorStop(0, 'rgba(255,255,255,1)');
+    grad.addColorStop(0.7, 'rgba(255,255,255,1)');
+    grad.addColorStop(1, 'rgba(255,255,255,0)');
+    maskCtx.fillStyle = grad;
+    maskCtx.beginPath();
+    maskCtx.arc(x, y, r, 0, Math.PI * 2);
+    maskCtx.fill();
+    hasMaskContent = true;
+  }
+  function paintStroke() {
+    if (lastPaintPos) {
+      var dx = cursor.x - lastPaintPos.x, dy = cursor.y - lastPaintPos.y;
+      var dist = Math.sqrt(dx * dx + dy * dy);
+      var step = Math.max(2, brushSize / 4);
+      var steps = Math.ceil(dist / step);
+      for (var i = 1; i <= steps; i++) {
+        var t = i / steps;
+        paintStamp(lastPaintPos.x + dx * t, lastPaintPos.y + dy * t);
+      }
+    } else {
+      paintStamp(cursor.x, cursor.y);
+    }
+    lastPaintPos = { x: cursor.x, y: cursor.y };
+  }
+  canvas.addEventListener('pointerdown', function (e) {
+    if (!paintActive) return;
+    updateCursorFromEvent(e.clientX, e.clientY);
+    isPainting = true;
+    lastPaintPos = null;
+    paintStroke();
+  });
+  window.addEventListener('pointerup', function () { isPainting = false; lastPaintPos = null; });
+
+  // Applies the pixelate/blur transform to the whole current frame, masks
+  // it down to the painted alpha, and composites the result back on top —
+  // so only painted regions show the effect, and it stays live every frame.
+  function applyPaintMask() {
+    transformCtx.clearRect(0, 0, transformCanvas.width, transformCanvas.height);
+    if (paintMode === 'pixelate') {
+      var block = Math.max(1, pixelStrength);
+      var sw = Math.max(1, Math.round(canvas.width / block));
+      var sh = Math.max(1, Math.round(canvas.height / block));
+      smallCanvas.width = sw;
+      smallCanvas.height = sh;
+      smallCtx.imageSmoothingEnabled = true;
+      smallCtx.drawImage(canvas, 0, 0, sw, sh);
+      transformCtx.imageSmoothingEnabled = false;
+      transformCtx.drawImage(smallCanvas, 0, 0, sw, sh, 0, 0, transformCanvas.width, transformCanvas.height);
+    } else {
+      transformCtx.filter = 'blur(' + blurStrength + 'px)';
+      transformCtx.drawImage(canvas, 0, 0);
+      transformCtx.filter = 'none';
+    }
+
+    paintedCtx.clearRect(0, 0, paintedCanvas.width, paintedCanvas.height);
+    paintedCtx.globalCompositeOperation = 'source-over';
+    paintedCtx.drawImage(transformCanvas, 0, 0);
+    paintedCtx.globalCompositeOperation = 'destination-in';
+    paintedCtx.drawImage(maskCanvas, 0, 0);
+    paintedCtx.globalCompositeOperation = 'source-over';
+
+    ctx.drawImage(paintedCanvas, 0, 0);
+  }
+
   // Accounts for object-fit: contain letterboxing so the cursor position
   // maps correctly onto the canvas's internal pixel resolution.
   function updateCursorFromEvent(clientX, clientY) {
@@ -451,10 +626,16 @@
     cursor.y = (relY / drawHeight) * canvas.height;
     cursor.active = relX >= 0 && relX <= drawWidth && relY >= 0 && relY <= drawHeight;
   }
-  canvas.addEventListener('mousemove', function (e) { updateCursorFromEvent(e.clientX, e.clientY); });
+  canvas.addEventListener('mousemove', function (e) {
+    updateCursorFromEvent(e.clientX, e.clientY);
+    if (isPainting && paintActive) paintStroke();
+  });
   canvas.addEventListener('mouseleave', function () { cursor.active = false; });
   canvas.addEventListener('touchmove', function (e) {
-    if (e.touches[0]) updateCursorFromEvent(e.touches[0].clientX, e.touches[0].clientY);
+    if (e.touches[0]) {
+      updateCursorFromEvent(e.touches[0].clientX, e.touches[0].clientY);
+      if (isPainting && paintActive) paintStroke();
+    }
   }, { passive: true });
   canvas.addEventListener('click', function () {
     if (freezeActive) captureFreeze();
@@ -819,6 +1000,15 @@
       ctx.putImageData(frame, 0, 0);
     }
 
+    if (hasMaskContent) applyPaintMask();
+    if (paintActive && cursor.active) {
+      ctx.beginPath();
+      ctx.arc(cursor.x, cursor.y, brushSize / 2, 0, Math.PI * 2);
+      ctx.strokeStyle = 'rgba(255,255,255,0.6)';
+      ctx.lineWidth = 1.5;
+      ctx.stroke();
+    }
+
     if (freezeActive && hasFreezeFrame && cursor.active) {
       ctx.save();
       ctx.beginPath();
@@ -851,6 +1041,12 @@
     video.onloadedmetadata = function () {
       canvas.width = video.videoWidth || 640;
       canvas.height = video.videoHeight || 480;
+      maskCanvas.width = canvas.width;
+      maskCanvas.height = canvas.height;
+      transformCanvas.width = canvas.width;
+      transformCanvas.height = canvas.height;
+      paintedCanvas.width = canvas.width;
+      paintedCanvas.height = canvas.height;
       statusEl.style.display = 'none';
       requestAnimationFrame(draw);
     };

@@ -271,10 +271,6 @@
       <input type="range" id="stripe-interval" min="30" max="3000" step="10" value="150">
       <span class="value" id="stripe-interval-value">150ms</span>
     </div>
-    <div class="setting-row">
-      <label for="stripe-loop">Loop</label>
-      <input type="checkbox" id="stripe-loop">
-    </div>
     <button id="stripe-capture" type="button">Capture</button>
     <p id="stripe-progress" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
   </div>
@@ -316,7 +312,6 @@
   var stripeCountValue = document.getElementById('stripe-count-value');
   var stripeIntervalInput = document.getElementById('stripe-interval');
   var stripeIntervalValue = document.getElementById('stripe-interval-value');
-  var stripeLoopInput = document.getElementById('stripe-loop');
   var stripeCaptureBtn = document.getElementById('stripe-capture');
   var stripeProgress = document.getElementById('stripe-progress');
 
@@ -333,11 +328,10 @@
 
   var sequence = {
     active: false,
-    loop: false,
     cycle: 1,
     orientation: 'vertical',
-    count: 8,
-    interval: 400,
+    count: 16,
+    interval: 150,
     stripes: [],
     timer: null
   };
@@ -455,9 +449,11 @@
     dither.color = colorDitherInput.checked;
   });
 
+  // All three controls update the live sequence directly, even mid-capture —
+  // the running loop reads sequence.count/interval/orientation fresh on
+  // every tick, so changes apply immediately without stopping or resetting.
   orientationGroup.querySelectorAll('button[data-orientation]').forEach(function (btn) {
     btn.addEventListener('click', function () {
-      if (sequence.active) return;
       orientationGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       sequence.orientation = btn.dataset.orientation;
@@ -465,9 +461,11 @@
   });
   stripeCountInput.addEventListener('input', function () {
     stripeCountValue.textContent = stripeCountInput.value;
+    sequence.count = parseInt(stripeCountInput.value, 10);
   });
   stripeIntervalInput.addEventListener('input', function () {
     stripeIntervalValue.textContent = stripeIntervalInput.value + 'ms';
+    sequence.interval = parseInt(stripeIntervalInput.value, 10);
   });
 
   // Splits a captured full-frame ImageData into the rect for one stripe.
@@ -500,39 +498,19 @@
   }
 
   // `tick` counts every capture ever made in this run; the stripe it writes
-  // to is `tick % count`. Looping just keeps ticking forever instead of
-  // stopping at `count` — each tick replaces one stripe in place, so the
-  // composite is never cleared and the roll is seamless, with no flash
-  // back to a blank/live canvas between cycles.
+  // to is `tick % sequence.count`, read fresh every call — so changing the
+  // stripe count, interval, or orientation live retargets the very next
+  // tick instead of requiring a restart. It never stops on its own: once
+  // the composite is fully filled, it keeps rolling forward indefinitely,
+  // replacing one stripe in place per tick with no reset/flash, until Stop
+  // is clicked.
   function runCapture(tick) {
     var slot = tick % sequence.count;
     captureStripe(slot);
     sequence.cycle = Math.floor(tick / sequence.count) + 1;
-
-    if (!sequence.loop) {
-      stripeProgress.textContent = 'Captured ' + (tick + 1) + ' of ' + sequence.count + '.';
-      if (tick + 1 < sequence.count) {
-        stripeCaptureBtn.textContent = 'Cancel (' + (tick + 1) + '/' + sequence.count + ')';
-        sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
-      } else {
-        sequence.active = false;
-        sequence.timer = null;
-        stripeCaptureBtn.textContent = 'Capture';
-        setInputsDisabled(false);
-      }
-    } else {
-      stripeProgress.textContent = 'Rolling — stripe ' + (slot + 1) + ' of ' + sequence.count +
-        ' refreshed (pass ' + sequence.cycle + ').';
-      stripeCaptureBtn.textContent = 'Stop';
-      sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
-    }
-  }
-
-  function setInputsDisabled(disabled) {
-    stripeCountInput.disabled = disabled;
-    stripeIntervalInput.disabled = disabled;
-    stripeLoopInput.disabled = disabled;
-    orientationGroup.querySelectorAll('button').forEach(function (b) { b.disabled = disabled; });
+    stripeProgress.textContent = 'Rolling — stripe ' + (slot + 1) + ' of ' + sequence.count +
+      ' refreshed (pass ' + sequence.cycle + ').';
+    sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
   }
 
   function cancelSequence() {
@@ -541,8 +519,7 @@
     sequence.active = false;
     sequence.stripes = [];
     stripeCaptureBtn.textContent = 'Capture';
-    stripeProgress.textContent = 'Cancelled.';
-    setInputsDisabled(false);
+    stripeProgress.textContent = 'Stopped.';
   }
 
   stripeCaptureBtn.addEventListener('click', function () {
@@ -552,11 +529,10 @@
     }
     sequence.count = parseInt(stripeCountInput.value, 10);
     sequence.interval = parseInt(stripeIntervalInput.value, 10);
-    sequence.loop = stripeLoopInput.checked;
     sequence.cycle = 1;
     sequence.stripes = new Array(sequence.count).fill(null);
     sequence.active = true;
-    setInputsDisabled(true);
+    stripeCaptureBtn.textContent = 'Stop';
     runCapture(0);
   });
 

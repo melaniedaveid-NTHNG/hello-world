@@ -263,13 +263,13 @@
     </div>
     <div class="setting-row">
       <label for="stripe-count">Stripes</label>
-      <input type="range" id="stripe-count" min="2" max="24" step="1" value="8">
-      <span class="value" id="stripe-count-value">8</span>
+      <input type="range" id="stripe-count" min="2" max="60" step="1" value="16">
+      <span class="value" id="stripe-count-value">16</span>
     </div>
     <div class="setting-row">
       <label for="stripe-interval">Interval</label>
-      <input type="range" id="stripe-interval" min="100" max="3000" step="100" value="400">
-      <span class="value" id="stripe-interval-value">400ms</span>
+      <input type="range" id="stripe-interval" min="30" max="3000" step="10" value="150">
+      <span class="value" id="stripe-interval-value">150ms</span>
     </div>
     <div class="setting-row">
       <label for="stripe-loop">Loop</label>
@@ -499,23 +499,32 @@
     sequence.stripes[index] = { rect: rect, data: extractRegion(full, rect) };
   }
 
-  function runCapture(index) {
-    captureStripe(index);
-    var cycleLabel = sequence.loop ? ' (cycle ' + sequence.cycle + ')' : '';
-    stripeProgress.textContent = 'Captured ' + (index + 1) + ' of ' + sequence.count + cycleLabel + '.';
-    if (index + 1 < sequence.count) {
-      stripeCaptureBtn.textContent = sequence.loop ? 'Stop' : 'Cancel (' + (index + 1) + '/' + sequence.count + ')';
-      sequence.timer = setTimeout(function () { runCapture(index + 1); }, sequence.interval);
-    } else if (sequence.loop) {
-      sequence.cycle++;
-      sequence.stripes = new Array(sequence.count).fill(null);
-      stripeCaptureBtn.textContent = 'Stop';
-      sequence.timer = setTimeout(function () { runCapture(0); }, sequence.interval);
+  // `tick` counts every capture ever made in this run; the stripe it writes
+  // to is `tick % count`. Looping just keeps ticking forever instead of
+  // stopping at `count` — each tick replaces one stripe in place, so the
+  // composite is never cleared and the roll is seamless, with no flash
+  // back to a blank/live canvas between cycles.
+  function runCapture(tick) {
+    var slot = tick % sequence.count;
+    captureStripe(slot);
+    sequence.cycle = Math.floor(tick / sequence.count) + 1;
+
+    if (!sequence.loop) {
+      stripeProgress.textContent = 'Captured ' + (tick + 1) + ' of ' + sequence.count + '.';
+      if (tick + 1 < sequence.count) {
+        stripeCaptureBtn.textContent = 'Cancel (' + (tick + 1) + '/' + sequence.count + ')';
+        sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
+      } else {
+        sequence.active = false;
+        sequence.timer = null;
+        stripeCaptureBtn.textContent = 'Capture';
+        setInputsDisabled(false);
+      }
     } else {
-      sequence.active = false;
-      sequence.timer = null;
-      stripeCaptureBtn.textContent = 'Capture';
-      setInputsDisabled(false);
+      stripeProgress.textContent = 'Rolling — stripe ' + (slot + 1) + ' of ' + sequence.count +
+        ' refreshed (pass ' + sequence.cycle + ').';
+      stripeCaptureBtn.textContent = 'Stop';
+      sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
     }
   }
 

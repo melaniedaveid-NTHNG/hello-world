@@ -113,7 +113,8 @@
     width: 100%;
   }
   #dither-settings,
-  #freeze-settings {
+  #freeze-settings,
+  #stripe-panel {
     display: none;
     flex-direction: column;
     gap: 0.75rem;
@@ -124,7 +125,14 @@
     box-sizing: border-box;
   }
   #dither-settings.visible,
-  #freeze-settings.visible { display: flex; }
+  #freeze-settings.visible,
+  #stripe-panel { display: flex; }
+  .section-title {
+    font-size: 0.85rem;
+    font-weight: 400;
+    color: #fff;
+    margin: 0;
+  }
   .setting-row {
     display: flex;
     align-items: center;
@@ -243,6 +251,29 @@
       <input type="checkbox" id="color-dither">
     </div>
   </div>
+
+  <div id="stripe-panel">
+    <p class="section-title">Stripe Capture</p>
+    <div class="setting-row">
+      <label>Orientation</label>
+      <div class="pill-group" id="orientation-group">
+        <button data-orientation="vertical" class="active" type="button">Vertical</button>
+        <button data-orientation="horizontal" type="button">Horizontal</button>
+      </div>
+    </div>
+    <div class="setting-row">
+      <label for="stripe-count">Stripes</label>
+      <input type="range" id="stripe-count" min="2" max="24" step="1" value="8">
+      <span class="value" id="stripe-count-value">8</span>
+    </div>
+    <div class="setting-row">
+      <label for="stripe-interval">Interval</label>
+      <input type="range" id="stripe-interval" min="100" max="3000" step="100" value="400">
+      <span class="value" id="stripe-interval-value">400ms</span>
+    </div>
+    <button id="stripe-capture" type="button">Capture</button>
+    <p id="stripe-progress" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
+  </div>
 </div>
 
 <div id="main">
@@ -276,6 +307,13 @@
   var brightnessInput = document.getElementById('brightness');
   var brightnessValue = document.getElementById('brightness-value');
   var colorDitherInput = document.getElementById('color-dither');
+  var orientationGroup = document.getElementById('orientation-group');
+  var stripeCountInput = document.getElementById('stripe-count');
+  var stripeCountValue = document.getElementById('stripe-count-value');
+  var stripeIntervalInput = document.getElementById('stripe-interval');
+  var stripeIntervalValue = document.getElementById('stripe-interval-value');
+  var stripeCaptureBtn = document.getElementById('stripe-capture');
+  var stripeProgress = document.getElementById('stripe-progress');
 
   var effect = 'normal';
   var mirrored = true;
@@ -287,6 +325,15 @@
   var freezeCanvas = document.createElement('canvas');
   var freezeCtx = freezeCanvas.getContext('2d');
   var hasFreezeFrame = false;
+
+  var sequence = {
+    active: false,
+    orientation: 'vertical',
+    count: 8,
+    interval: 400,
+    stripes: [],
+    timer: null
+  };
 
   controls.querySelectorAll('button[data-effect]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -399,6 +446,93 @@
   });
   colorDitherInput.addEventListener('change', function () {
     dither.color = colorDitherInput.checked;
+  });
+
+  orientationGroup.querySelectorAll('button[data-orientation]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      if (sequence.active) return;
+      orientationGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      sequence.orientation = btn.dataset.orientation;
+    });
+  });
+  stripeCountInput.addEventListener('input', function () {
+    stripeCountValue.textContent = stripeCountInput.value;
+  });
+  stripeIntervalInput.addEventListener('input', function () {
+    stripeIntervalValue.textContent = stripeIntervalInput.value + 'ms';
+  });
+
+  // Splits a captured full-frame ImageData into the rect for one stripe.
+  function extractRegion(full, rect) {
+    var out = ctx.createImageData(rect.w, rect.h);
+    var src = full.data, dst = out.data;
+    var rowBytes = rect.w * 4;
+    for (var row = 0; row < rect.h; row++) {
+      var srcStart = ((rect.y + row) * full.width + rect.x) * 4;
+      dst.set(src.subarray(srcStart, srcStart + rowBytes), row * rowBytes);
+    }
+    return out;
+  }
+
+  function stripeRect(index, count, orientation) {
+    if (orientation === 'horizontal') {
+      var y0 = Math.floor((index * canvas.height) / count);
+      var y1 = Math.floor(((index + 1) * canvas.height) / count);
+      return { x: 0, y: y0, w: canvas.width, h: y1 - y0 };
+    }
+    var x0 = Math.floor((index * canvas.width) / count);
+    var x1 = Math.floor(((index + 1) * canvas.width) / count);
+    return { x: x0, y: 0, w: x1 - x0, h: canvas.height };
+  }
+
+  function captureStripe(index) {
+    var full = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var rect = stripeRect(index, sequence.count, sequence.orientation);
+    sequence.stripes[index] = { rect: rect, data: extractRegion(full, rect) };
+  }
+
+  function runCapture(index) {
+    captureStripe(index);
+    stripeProgress.textContent = 'Captured ' + (index + 1) + ' of ' + sequence.count + '.';
+    if (index + 1 < sequence.count) {
+      stripeCaptureBtn.textContent = 'Cancel (' + (index + 1) + '/' + sequence.count + ')';
+      sequence.timer = setTimeout(function () { runCapture(index + 1); }, sequence.interval);
+    } else {
+      sequence.active = false;
+      sequence.timer = null;
+      stripeCaptureBtn.textContent = 'Capture';
+      setInputsDisabled(false);
+    }
+  }
+
+  function setInputsDisabled(disabled) {
+    stripeCountInput.disabled = disabled;
+    stripeIntervalInput.disabled = disabled;
+    orientationGroup.querySelectorAll('button').forEach(function (b) { b.disabled = disabled; });
+  }
+
+  function cancelSequence() {
+    if (sequence.timer) clearTimeout(sequence.timer);
+    sequence.timer = null;
+    sequence.active = false;
+    sequence.stripes = [];
+    stripeCaptureBtn.textContent = 'Capture';
+    stripeProgress.textContent = 'Cancelled.';
+    setInputsDisabled(false);
+  }
+
+  stripeCaptureBtn.addEventListener('click', function () {
+    if (sequence.active) {
+      cancelSequence();
+      return;
+    }
+    sequence.count = parseInt(stripeCountInput.value, 10);
+    sequence.interval = parseInt(stripeIntervalInput.value, 10);
+    sequence.stripes = new Array(sequence.count).fill(null);
+    sequence.active = true;
+    setInputsDisabled(true);
+    runCapture(0);
   });
 
   // Bayer matrices at a few sizes — bigger matrices give smoother, more
@@ -568,6 +702,13 @@
       ctx.strokeStyle = '#ff5a1f';
       ctx.lineWidth = 2;
       ctx.stroke();
+    }
+
+    // Locked stripes from a capture sequence paint over the live frame,
+    // so already-captured stripes stay frozen while the rest keeps playing.
+    for (var s = 0; s < sequence.stripes.length; s++) {
+      var stripe = sequence.stripes[s];
+      if (stripe) ctx.putImageData(stripe.data, stripe.rect.x, stripe.rect.y);
     }
 
     requestAnimationFrame(draw);

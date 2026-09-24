@@ -488,7 +488,7 @@
     scene.add(group);
     three = {
       renderer: renderer, scene: scene, camera: camera, texture: texture, group: group,
-      autoAngle: 0, drag: { active: false, x: 0, y: 0, rotX: 0, rotY: 0 }
+      autoAngle: 0, lastTime: 0, drag: { active: false, x: 0, y: 0, rotX: 0, rotY: 0 }
     };
     return three;
   }
@@ -538,7 +538,9 @@
     var t = ensureThree();
     if (!t) return;
     t.texture.needsUpdate = true;
-    t.autoAngle += (shapeRotationSpeed / 1000) * 0.6;
+    var deltaSeconds = t.lastTime ? Math.min(0.1, (now - t.lastTime) / 1000) : 0;
+    t.lastTime = now;
+    t.autoAngle += (shapeRotationSpeed / 50) * 1.2 * deltaSeconds;
     var ry = t.autoAngle + t.drag.rotY;
     var rx = t.drag.rotX;
     for (var i = 0; i < t.group.children.length; i++) {

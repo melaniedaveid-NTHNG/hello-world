@@ -311,18 +311,18 @@
     </div>
     <div class="setting-row">
       <label for="shape-count">Count</label>
-      <input type="range" id="shape-count" min="1" max="9" step="1" value="4">
-      <span class="value" id="shape-count-value">4</span>
+      <input type="range" id="shape-count" min="1" max="9" step="1" value="6">
+      <span class="value" id="shape-count-value">6</span>
     </div>
     <div class="setting-row">
       <label for="shape-size">Size</label>
-      <input type="range" id="shape-size" min="30" max="600" step="10" value="220">
-      <span class="value" id="shape-size-value">220</span>
+      <input type="range" id="shape-size" min="30" max="250" step="5" value="140">
+      <span class="value" id="shape-size-value">140%</span>
     </div>
     <div class="setting-row">
-      <label for="shape-spacing">Spacing</label>
-      <input type="range" id="shape-spacing" min="50" max="400" step="10" value="180">
-      <span class="value" id="shape-spacing-value">180</span>
+      <label for="shape-spacing">Spread</label>
+      <input type="range" id="shape-spacing" min="0" max="150" step="5" value="55">
+      <span class="value" id="shape-spacing-value">55%</span>
     </div>
     <div class="setting-row">
       <label for="shape-rotation-speed">Rotation</label>
@@ -555,18 +555,23 @@
   // 2D pipeline currently shows becomes the "skin" on the geometry.
   var shapesActive = false;
   var shapeType = 'sphere';
-  var shapeCount = 4;
-  var shapeSize = 220;
-  var shapeSpacing = 180;
+  var shapeCount = 6;
+  var shapeSize = 140; // percent of the visible frame height at the fixed camera distance
+  var shapeSpacing = 55; // percent of the visible frame half-width used as scatter radius
   var shapeRotationSpeed = 10;
   var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
+
+  var SHAPE_CAMERA_DISTANCE = 900;
+  var SHAPE_CAMERA_FOV = 50;
 
   function ensureThree() {
     if (three || typeof THREE === 'undefined') return three;
     var renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, preserveDrawingBuffer: true, alpha: true });
     renderer.setClearColor(0x000000, 0);
     var scene = new THREE.Scene();
-    var camera = new THREE.PerspectiveCamera(50, 1, 1, 5000);
+    var camera = new THREE.PerspectiveCamera(SHAPE_CAMERA_FOV, 1, 1, 5000);
+    camera.position.set(0, 0, SHAPE_CAMERA_DISTANCE);
+    camera.lookAt(0, 0, 0);
     var texture = new THREE.CanvasTexture(canvas);
     texture.minFilter = THREE.LinearFilter;
     var group = new THREE.Group();
@@ -588,34 +593,61 @@
     three.camera.updateProjectionMatrix();
   }
 
+  // Cheap deterministic-per-vertex "noise": a few offset sine waves summed
+  // together. Good enough to break a perfect sphere/box into a lumpy,
+  // organic blob without pulling in a full noise library.
+  function organicNoise(x, y, z, seed, t) {
+    return Math.sin(x * 0.02 + seed + t * 0.6) * Math.cos(y * 0.021 + seed * 1.7 + t * 0.5) * 0.6
+      + Math.sin(z * 0.025 - seed * 1.3 + t * 0.4) * 0.4;
+  }
+
+  // Icosahedra read as organic blobs; boxes get extra subdivisions so the
+  // same vertex-noise displacement can round and warp their faces too,
+  // instead of staying perfectly flat/geometric.
+  function buildOrganicGeometry(kind, size) {
+    return kind === 'box'
+      ? new THREE.BoxGeometry(size, size, size, 6, 6, 6)
+      : new THREE.IcosahedronGeometry(size / 2, 2);
+  }
+
+  // Scatters shapes of varied size across the frame the camera actually
+  // sees (computed from its fixed distance/FOV), rather than a tidy grid —
+  // "Size" is a percent of the visible frame height and "Spread" a percent
+  // of the visible half-width, so both stay meaningful at any window size
+  // and reliably fill the screen instead of a handful of fixed pixel sizes.
   function rebuildShapes() {
     var t = ensureThree();
     if (!t) return;
     while (t.group.children.length) {
-      var mesh = t.group.children.pop();
-      mesh.geometry.dispose();
-      mesh.material.dispose();
+      var old = t.group.children.pop();
+      old.geometry.dispose();
+      old.material.dispose();
     }
-    var geometry = shapeType === 'box'
-      ? new THREE.BoxGeometry(shapeSize, shapeSize, shapeSize)
-      : new THREE.SphereGeometry(shapeSize / 2, 48, 32);
-    var cols = Math.ceil(Math.sqrt(shapeCount));
-    var rows = Math.ceil(shapeCount / cols);
+    var fovRad = (SHAPE_CAMERA_FOV * Math.PI) / 180;
+    var visibleH = 2 * SHAPE_CAMERA_DISTANCE * Math.tan(fovRad / 2);
+    var visibleW = visibleH * t.camera.aspect;
+    var baseSize = (shapeSize / 100) * visibleH;
+    var spreadX = (shapeSpacing / 100) * visibleW * 0.5;
+    var spreadY = (shapeSpacing / 100) * visibleH * 0.5;
+
     for (var i = 0; i < shapeCount; i++) {
-      var col = i % cols;
-      var row = Math.floor(i / cols);
+      var sizeMul = 0.6 + Math.random() * 1.0;
+      var size = baseSize * sizeMul;
+      var geometry = buildOrganicGeometry(shapeType, size);
       var material = new THREE.MeshBasicMaterial({ map: t.texture });
       var mesh = new THREE.Mesh(geometry, material);
+      var angle = Math.random() * Math.PI * 2;
+      var radiusFrac = Math.sqrt(Math.random());
       mesh.position.set(
-        (col - (cols - 1) / 2) * shapeSpacing,
-        -(row - (rows - 1) / 2) * shapeSpacing,
-        0
+        Math.cos(angle) * spreadX * radiusFrac,
+        Math.sin(angle) * spreadY * radiusFrac,
+        (Math.random() - 0.5) * baseSize * 0.4
       );
+      mesh.userData.basePositions = new Float32Array(geometry.attributes.position.array);
+      mesh.userData.noiseSeed = Math.random() * 1000;
+      mesh.userData.noiseAmount = size * 0.16;
       t.group.add(mesh);
     }
-    var extent = Math.max(cols, rows) * shapeSpacing + shapeSize * 2;
-    t.camera.position.set(0, 0, extent * 1.15 + 200);
-    t.camera.lookAt(0, 0, 0);
   }
 
   function renderThree(now) {
@@ -625,12 +657,31 @@
     t.texture.needsUpdate = true;
     var deltaSeconds = t.lastTime ? Math.min(0.1, (now - t.lastTime) / 1000) : 0;
     t.lastTime = now;
+    // Always advancing — auto-rotation and the organic "breathing" pulse
+    // both run continuously regardless of user interaction, so there's
+    // always visible motion on screen (a live performance shouldn't ever
+    // look static/frozen).
     t.autoAngle += (shapeRotationSpeed / 50) * 1.2 * deltaSeconds;
+    var timeSeconds = now / 1000;
     var ry = t.autoAngle + t.drag.rotY;
     var rx = t.drag.rotX;
     for (var i = 0; i < t.group.children.length; i++) {
-      t.group.children[i].rotation.y = ry;
-      t.group.children[i].rotation.x = rx;
+      var mesh = t.group.children[i];
+      mesh.rotation.y = ry;
+      mesh.rotation.x = rx;
+
+      var base = mesh.userData.basePositions;
+      var seed = mesh.userData.noiseSeed;
+      var amount = mesh.userData.noiseAmount;
+      var pos = mesh.geometry.attributes.position;
+      for (var v = 0; v < pos.count; v++) {
+        var ix = v * 3;
+        var bx = base[ix], by = base[ix + 1], bz = base[ix + 2];
+        var len = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
+        var n = organicNoise(bx, by, bz, seed, timeSeconds) * amount;
+        pos.setXYZ(v, bx + (bx / len) * n, by + (by / len) * n, bz + (bz / len) * n);
+      }
+      pos.needsUpdate = true;
     }
     t.renderer.render(t.scene, t.camera);
   }
@@ -970,12 +1021,12 @@
   });
   shapeSizeInput.addEventListener('input', function () {
     shapeSize = parseInt(shapeSizeInput.value, 10);
-    shapeSizeValue.textContent = shapeSizeInput.value;
+    shapeSizeValue.textContent = shapeSizeInput.value + '%';
     rebuildShapes();
   });
   shapeSpacingInput.addEventListener('input', function () {
     shapeSpacing = parseInt(shapeSpacingInput.value, 10);
-    shapeSpacingValue.textContent = shapeSpacingInput.value;
+    shapeSpacingValue.textContent = shapeSpacingInput.value + '%';
     rebuildShapes();
   });
   shapeRotationSpeedInput.addEventListener('input', function () {
@@ -1002,7 +1053,13 @@
   });
   window.addEventListener('pointerup', function () { if (three) three.drag.active = false; });
   threeCanvas.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
-  window.addEventListener('resize', function () { if (shapesActive) resizeThree(); });
+  var shapesResizeTimer = null;
+  window.addEventListener('resize', function () {
+    if (!shapesActive) return;
+    resizeThree();
+    clearTimeout(shapesResizeTimer);
+    shapesResizeTimer = setTimeout(rebuildShapes, 150);
+  });
 
   // Applies the pixelate/blur transform to the whole current frame, masks
   // it down to the painted alpha, and composites the result back on top —

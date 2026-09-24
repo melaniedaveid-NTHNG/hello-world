@@ -63,6 +63,12 @@
     border-radius: 8px;
     background: #111;
   }
+  #three-canvas {
+    /* Transparent so the live 2D canvas underneath — the actual camera
+       feed — shows through around and behind the shapes, instead of this
+       element's own CSS background painting over it. */
+    background: transparent;
+  }
   #stage:fullscreen canvas,
   #stage:-webkit-full-screen canvas {
     border-radius: 0;

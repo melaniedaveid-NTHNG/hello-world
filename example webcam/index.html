@@ -55,6 +55,8 @@
   }
   canvas {
     display: block;
+    position: absolute;
+    inset: 0;
     width: 100%;
     height: 100%;
     object-fit: contain;
@@ -115,6 +117,7 @@
   #dither-settings,
   #freeze-settings,
   #paint-settings,
+  #shapes-settings,
   #stripe-panel {
     display: none;
     flex-direction: column;
@@ -128,6 +131,7 @@
   #dither-settings.visible,
   #freeze-settings.visible,
   #paint-settings.visible,
+  #shapes-settings.visible,
   #stripe-panel { display: flex; }
   .section-title {
     font-size: 0.85rem;
@@ -200,6 +204,7 @@
     <button id="mirror" class="active">Mirror</button>
     <button id="freeze">Freeze</button>
     <button id="paint">Paint</button>
+    <button id="shapes-toggle">3D Shapes</button>
     <button id="fullscreen">Fullscreen</button>
   </div>
 
@@ -247,6 +252,39 @@
       <button id="eraser" type="button" style="flex: 1;">Eraser</button>
       <button id="clear-paint" type="button" style="flex: 1;">Clear all</button>
     </div>
+  </div>
+
+  <div id="shapes-settings">
+    <div class="setting-row">
+      <label>Shape</label>
+      <div class="pill-group" id="shape-type-group">
+        <button data-shape="sphere" class="active" type="button">Sphere</button>
+        <button data-shape="box" type="button">Box</button>
+      </div>
+    </div>
+    <div class="setting-row">
+      <label for="shape-count">Count</label>
+      <input type="range" id="shape-count" min="1" max="9" step="1" value="4">
+      <span class="value" id="shape-count-value">4</span>
+    </div>
+    <div class="setting-row">
+      <label for="shape-size">Size</label>
+      <input type="range" id="shape-size" min="30" max="250" step="5" value="100">
+      <span class="value" id="shape-size-value">100</span>
+    </div>
+    <div class="setting-row">
+      <label for="shape-spacing">Spacing</label>
+      <input type="range" id="shape-spacing" min="50" max="400" step="10" value="180">
+      <span class="value" id="shape-spacing-value">180</span>
+    </div>
+    <div class="setting-row">
+      <label for="shape-rotation-speed">Rotation</label>
+      <input type="range" id="shape-rotation-speed" min="0" max="50" step="1" value="10">
+      <span class="value" id="shape-rotation-speed-value">10</span>
+    </div>
+    <p id="shapes-status" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
+      Drag the video to rotate the shapes.
+    </p>
   </div>
 
   <div id="dither-settings">
@@ -324,8 +362,11 @@
   <div id="stage">
     <video id="video" autoplay playsinline muted style="display:none"></video>
     <canvas id="canvas" width="640" height="480"></canvas>
+    <canvas id="three-canvas" style="display: none;"></canvas>
   </div>
 </div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r128/three.min.js"></script>
 
 <script>
 (function () {
@@ -354,6 +395,19 @@
   var blurStrengthValue = document.getElementById('blur-strength-value');
   var eraserBtn = document.getElementById('eraser');
   var clearPaintBtn = document.getElementById('clear-paint');
+  var threeCanvas = document.getElementById('three-canvas');
+  var shapesToggleBtn = document.getElementById('shapes-toggle');
+  var shapesSettings = document.getElementById('shapes-settings');
+  var shapeTypeGroup = document.getElementById('shape-type-group');
+  var shapeCountInput = document.getElementById('shape-count');
+  var shapeCountValue = document.getElementById('shape-count-value');
+  var shapeSizeInput = document.getElementById('shape-size');
+  var shapeSizeValue = document.getElementById('shape-size-value');
+  var shapeSpacingInput = document.getElementById('shape-spacing');
+  var shapeSpacingValue = document.getElementById('shape-spacing-value');
+  var shapeRotationSpeedInput = document.getElementById('shape-rotation-speed');
+  var shapeRotationSpeedValue = document.getElementById('shape-rotation-speed-value');
+  var shapesStatus = document.getElementById('shapes-status');
   var zoomInput = document.getElementById('zoom');
   var zoomValue = document.getElementById('zoom-value');
   var ditherSettings = document.getElementById('dither-settings');
@@ -410,6 +464,96 @@
   var paintedCtx = paintedCanvas.getContext('2d');
   var smallCanvas = document.createElement('canvas');
   var smallCtx = smallCanvas.getContext('2d');
+
+  // 3D shape mapping: the fully-composited 2D canvas (mirror/zoom/dither/
+  // paint mask already baked in) is wrapped as a CanvasTexture and applied
+  // to a grid of sphere/box meshes rendered with three.js, so whatever the
+  // 2D pipeline currently shows becomes the "skin" on the geometry.
+  var shapesActive = false;
+  var shapeType = 'sphere';
+  var shapeCount = 4;
+  var shapeSize = 100;
+  var shapeSpacing = 180;
+  var shapeRotationSpeed = 10;
+  var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
+
+  function ensureThree() {
+    if (three || typeof THREE === 'undefined') return three;
+    var renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, preserveDrawingBuffer: true });
+    var scene = new THREE.Scene();
+    var camera = new THREE.PerspectiveCamera(50, 1, 1, 5000);
+    var texture = new THREE.CanvasTexture(canvas);
+    texture.minFilter = THREE.LinearFilter;
+    var group = new THREE.Group();
+    scene.add(group);
+    three = {
+      renderer: renderer, scene: scene, camera: camera, texture: texture, group: group,
+      autoAngle: 0, drag: { active: false, x: 0, y: 0, rotX: 0, rotY: 0 }
+    };
+    return three;
+  }
+
+  function resizeThree() {
+    if (!three) return;
+    var rect = stage.getBoundingClientRect();
+    var w = Math.max(1, Math.round(rect.width));
+    var h = Math.max(1, Math.round(rect.height));
+    three.renderer.setSize(w, h, false);
+    three.camera.aspect = w / h;
+    three.camera.updateProjectionMatrix();
+  }
+
+  function rebuildShapes() {
+    var t = ensureThree();
+    if (!t) return;
+    while (t.group.children.length) {
+      var mesh = t.group.children.pop();
+      mesh.geometry.dispose();
+      mesh.material.dispose();
+    }
+    var geometry = shapeType === 'box'
+      ? new THREE.BoxGeometry(shapeSize, shapeSize, shapeSize)
+      : new THREE.SphereGeometry(shapeSize / 2, 48, 32);
+    var cols = Math.ceil(Math.sqrt(shapeCount));
+    var rows = Math.ceil(shapeCount / cols);
+    for (var i = 0; i < shapeCount; i++) {
+      var col = i % cols;
+      var row = Math.floor(i / cols);
+      var material = new THREE.MeshBasicMaterial({ map: t.texture });
+      var mesh = new THREE.Mesh(geometry, material);
+      mesh.position.set(
+        (col - (cols - 1) / 2) * shapeSpacing,
+        -(row - (rows - 1) / 2) * shapeSpacing,
+        0
+      );
+      t.group.add(mesh);
+    }
+    var extent = Math.max(cols, rows) * shapeSpacing + shapeSize * 2;
+    t.camera.position.set(0, 0, extent * 1.15 + 200);
+    t.camera.lookAt(0, 0, 0);
+  }
+
+  function renderThree(now) {
+    if (!shapesActive) return;
+    var t = ensureThree();
+    if (!t) return;
+    t.texture.needsUpdate = true;
+    t.autoAngle += (shapeRotationSpeed / 1000) * 0.6;
+    var ry = t.autoAngle + t.drag.rotY;
+    var rx = t.drag.rotX;
+    for (var i = 0; i < t.group.children.length; i++) {
+      t.group.children[i].rotation.y = ry;
+      t.group.children[i].rotation.x = rx;
+    }
+    t.renderer.render(t.scene, t.camera);
+  }
+
+  // A small offscreen 2D canvas used to snapshot the WebGL shapes canvas
+  // (which doesn't support getImageData directly) when it's the current
+  // "live feed", so freeze/stripe capture can read pixels from it the same
+  // way they already do for the flat 2D canvas.
+  var captureBuffer = document.createElement('canvas');
+  var captureBufferCtx = captureBuffer.getContext('2d', { willReadFrequently: true });
 
   var sequence = {
     active: false,
@@ -481,7 +625,8 @@
   function captureFreeze() {
     freezeCanvas.width = canvas.width;
     freezeCanvas.height = canvas.height;
-    freezeCtx.drawImage(canvas, 0, 0);
+    var source = (shapesActive && three) ? threeCanvas : canvas;
+    freezeCtx.drawImage(source, 0, 0, freezeCanvas.width, freezeCanvas.height);
     hasFreezeFrame = true;
   }
   freezeBtn.addEventListener('click', function () {
@@ -570,6 +715,71 @@
     paintStroke();
   });
   window.addEventListener('pointerup', function () { isPainting = false; lastPaintPos = null; });
+
+  shapesToggleBtn.addEventListener('click', function () {
+    shapesActive = !shapesActive;
+    if (shapesActive && !ensureThree()) {
+      shapesActive = false;
+      shapesStatus.textContent = '3D library failed to load — check your connection and reload.';
+      shapesStatus.style.color = '#ff5a1f';
+      return;
+    }
+    shapesToggleBtn.classList.toggle('active', shapesActive);
+    shapesSettings.classList.toggle('visible', shapesActive);
+    threeCanvas.style.display = shapesActive ? 'block' : 'none';
+    if (shapesActive) {
+      resizeThree();
+      rebuildShapes();
+    }
+  });
+  shapeTypeGroup.querySelectorAll('button[data-shape]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      shapeTypeGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      shapeType = btn.dataset.shape;
+      rebuildShapes();
+    });
+  });
+  shapeCountInput.addEventListener('input', function () {
+    shapeCount = parseInt(shapeCountInput.value, 10);
+    shapeCountValue.textContent = shapeCountInput.value;
+    rebuildShapes();
+  });
+  shapeSizeInput.addEventListener('input', function () {
+    shapeSize = parseInt(shapeSizeInput.value, 10);
+    shapeSizeValue.textContent = shapeSizeInput.value;
+    rebuildShapes();
+  });
+  shapeSpacingInput.addEventListener('input', function () {
+    shapeSpacing = parseInt(shapeSpacingInput.value, 10);
+    shapeSpacingValue.textContent = shapeSpacingInput.value;
+    rebuildShapes();
+  });
+  shapeRotationSpeedInput.addEventListener('input', function () {
+    shapeRotationSpeed = parseInt(shapeRotationSpeedInput.value, 10);
+    shapeRotationSpeedValue.textContent = shapeRotationSpeedInput.value;
+  });
+
+  // Drag-to-rotate: a pointer drag over the 3D canvas rotates the whole
+  // group of shapes, added on top of their continuous auto-rotation.
+  threeCanvas.addEventListener('pointerdown', function (e) {
+    if (!shapesActive || !three) return;
+    three.drag.active = true;
+    three.drag.x = e.clientX;
+    three.drag.y = e.clientY;
+  });
+  window.addEventListener('pointermove', function (e) {
+    if (!three || !three.drag.active) return;
+    var dx = e.clientX - three.drag.x;
+    var dy = e.clientY - three.drag.y;
+    three.drag.x = e.clientX;
+    three.drag.y = e.clientY;
+    three.drag.rotY += dx * 0.01;
+    three.drag.rotX += dy * 0.01;
+  });
+  window.addEventListener('pointerup', function () { if (three) three.drag.active = false; });
+  threeCanvas.addEventListener('touchmove', function (e) { e.preventDefault(); }, { passive: false });
+  window.addEventListener('resize', function () { if (shapesActive) resizeThree(); });
 
   // Applies the pixelate/blur transform to the whole current frame, masks
   // it down to the painted alpha, and composites the result back on top —
@@ -734,7 +944,15 @@
   }
 
   function captureStripe(index) {
-    var full = ctx.getImageData(0, 0, canvas.width, canvas.height);
+    var w = canvas.width, h = canvas.height;
+    var pixelSource = ctx;
+    if (shapesActive && three) {
+      captureBuffer.width = w;
+      captureBuffer.height = h;
+      captureBufferCtx.drawImage(threeCanvas, 0, 0, w, h);
+      pixelSource = captureBufferCtx;
+    }
+    var full = pixelSource.getImageData(0, 0, w, h);
     var rect = stripeRect(index, sequence.count, sequence.orientation);
     sequence.stripes[index] = { rect: rect, data: extractRegion(full, rect) };
   }
@@ -1029,6 +1247,11 @@
       var stripe = sequence.stripes[s];
       if (stripe) ctx.putImageData(stripe.data, stripe.rect.x, stripe.rect.y);
     }
+
+    // Renders last, so the 3D shapes' shared texture picks up everything
+    // the 2D pipeline just drew this frame (effect, paint mask, freeze,
+    // stripes and all).
+    renderThree(now);
 
     requestAnimationFrame(draw);
   }

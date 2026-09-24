@@ -267,9 +267,21 @@
       <span class="value" id="stripe-count-value">16</span>
     </div>
     <div class="setting-row">
+      <label>Trigger</label>
+      <div class="pill-group" id="trigger-group">
+        <button data-trigger="interval" type="button">Interval</button>
+        <button data-trigger="movement" class="active" type="button">Head movement</button>
+      </div>
+    </div>
+    <div class="setting-row" id="interval-row" style="display: none;">
       <label for="stripe-interval">Interval</label>
       <input type="range" id="stripe-interval" min="30" max="3000" step="10" value="150">
       <span class="value" id="stripe-interval-value">150ms</span>
+    </div>
+    <div class="setting-row" id="sensitivity-row">
+      <label for="stripe-sensitivity">Sensitivity</label>
+      <input type="range" id="stripe-sensitivity" min="2" max="50" step="1" value="12">
+      <span class="value" id="stripe-sensitivity-value">12</span>
     </div>
     <button id="stripe-capture" type="button">Capture</button>
     <p id="stripe-progress" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
@@ -312,6 +324,11 @@
   var stripeCountValue = document.getElementById('stripe-count-value');
   var stripeIntervalInput = document.getElementById('stripe-interval');
   var stripeIntervalValue = document.getElementById('stripe-interval-value');
+  var triggerGroup = document.getElementById('trigger-group');
+  var intervalRow = document.getElementById('interval-row');
+  var sensitivityRow = document.getElementById('sensitivity-row');
+  var stripeSensitivityInput = document.getElementById('stripe-sensitivity');
+  var stripeSensitivityValue = document.getElementById('stripe-sensitivity-value');
   var stripeCaptureBtn = document.getElementById('stripe-capture');
   var stripeProgress = document.getElementById('stripe-progress');
 
@@ -329,12 +346,32 @@
   var sequence = {
     active: false,
     cycle: 1,
+    tick: 0,
+    trigger: 'movement',
     orientation: 'vertical',
     count: 16,
     interval: 150,
+    sensitivity: 0.12,
     stripes: [],
     timer: null
   };
+
+  // Lightweight "head tracking": rather than a full face-detection model,
+  // this downsamples the raw video to a tiny grayscale grid, diffs it
+  // against the previous frame, and takes the diff-weighted centroid as
+  // the tracked head position. It's cheap enough to run every frame and
+  // good enough to react to someone actually moving in frame.
+  var TRACK_W = 80, TRACK_H = 60;
+  var trackCanvas = document.createElement('canvas');
+  trackCanvas.width = TRACK_W;
+  trackCanvas.height = TRACK_H;
+  var trackCtx = trackCanvas.getContext('2d', { willReadFrequently: true });
+  var prevGray = null;
+  var lastCapturePos = null;
+  var lastMotionCaptureAt = 0;
+  var MOTION_COOLDOWN_MS = 120;
+  var MOTION_PIXEL_THRESHOLD = 20;
+  var MOTION_MIN_ENERGY = TRACK_W * TRACK_H * 0.35;
 
   controls.querySelectorAll('button[data-effect]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -467,6 +504,30 @@
     stripeIntervalValue.textContent = stripeIntervalInput.value + 'ms';
     sequence.interval = parseInt(stripeIntervalInput.value, 10);
   });
+  stripeSensitivityInput.addEventListener('input', function () {
+    stripeSensitivityValue.textContent = stripeSensitivityInput.value;
+    sequence.sensitivity = parseInt(stripeSensitivityInput.value, 10) / 100;
+  });
+  triggerGroup.querySelectorAll('button[data-trigger]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      triggerGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      sequence.trigger = btn.dataset.trigger;
+      intervalRow.style.display = sequence.trigger === 'interval' ? '' : 'none';
+      sensitivityRow.style.display = sequence.trigger === 'movement' ? '' : 'none';
+      // Switching trigger mode mid-run: interval mode needs its timer
+      // chain (re)started; movement mode just needs a fresh baseline so
+      // it doesn't immediately fire from stale motion history.
+      if (sequence.active) {
+        if (sequence.timer) clearTimeout(sequence.timer);
+        sequence.timer = null;
+        lastCapturePos = null;
+        if (sequence.trigger === 'interval') sequence.timer = setTimeout(runIntervalCapture, sequence.interval);
+      }
+    });
+  });
+  intervalRow.style.display = sequence.trigger === 'interval' ? '' : 'none';
+  sensitivityRow.style.display = sequence.trigger === 'movement' ? '' : 'none';
 
   // Splits a captured full-frame ImageData into the rect for one stripe.
   function extractRegion(full, rect) {
@@ -497,20 +558,32 @@
     sequence.stripes[index] = { rect: rect, data: extractRegion(full, rect) };
   }
 
-  // `tick` counts every capture ever made in this run; the stripe it writes
-  // to is `tick % sequence.count`, read fresh every call — so changing the
-  // stripe count, interval, or orientation live retargets the very next
-  // tick instead of requiring a restart. It never stops on its own: once
-  // the composite is fully filled, it keeps rolling forward indefinitely,
-  // replacing one stripe in place per tick with no reset/flash, until Stop
-  // is clicked.
-  function runCapture(tick) {
-    var slot = tick % sequence.count;
+  // `sequence.tick` counts every capture ever made in this run; the stripe
+  // it writes to is `tick % sequence.count`, read fresh every call — so
+  // changing the stripe count or orientation live retargets the very next
+  // capture instead of requiring a restart. It never stops on its own:
+  // once the composite is fully filled, it keeps rolling forward
+  // indefinitely, replacing one stripe in place per capture with no
+  // reset/flash, until Stop is clicked.
+  function captureOneStripe() {
+    var slot = sequence.tick % sequence.count;
     captureStripe(slot);
-    sequence.cycle = Math.floor(tick / sequence.count) + 1;
+    sequence.cycle = Math.floor(sequence.tick / sequence.count) + 1;
+    sequence.tick++;
+    return slot;
+  }
+
+  function runIntervalCapture() {
+    var slot = captureOneStripe();
     stripeProgress.textContent = 'Rolling — stripe ' + (slot + 1) + ' of ' + sequence.count +
       ' refreshed (pass ' + sequence.cycle + ').';
-    sequence.timer = setTimeout(function () { runCapture(tick + 1); }, sequence.interval);
+    sequence.timer = setTimeout(runIntervalCapture, sequence.interval);
+  }
+
+  function triggerMovementCapture() {
+    var slot = captureOneStripe();
+    stripeProgress.textContent = 'Head moved — stripe ' + (slot + 1) + ' of ' + sequence.count +
+      ' captured (pass ' + sequence.cycle + ').';
   }
 
   function cancelSequence() {
@@ -518,6 +591,7 @@
     sequence.timer = null;
     sequence.active = false;
     sequence.stripes = [];
+    lastCapturePos = null;
     stripeCaptureBtn.textContent = 'Capture';
     stripeProgress.textContent = 'Stopped.';
   }
@@ -530,11 +604,63 @@
     sequence.count = parseInt(stripeCountInput.value, 10);
     sequence.interval = parseInt(stripeIntervalInput.value, 10);
     sequence.cycle = 1;
+    sequence.tick = 0;
     sequence.stripes = new Array(sequence.count).fill(null);
     sequence.active = true;
+    lastCapturePos = null;
     stripeCaptureBtn.textContent = 'Stop';
-    runCapture(0);
+    // Seed the first stripe immediately either way, then hand off to the
+    // chosen trigger: a timer chain, or motion events from updateHeadTracking.
+    if (sequence.trigger === 'interval') {
+      runIntervalCapture();
+    } else {
+      triggerMovementCapture();
+    }
   });
+
+  // Draws the raw video into a tiny offscreen canvas, diffs it against the
+  // previous frame, and — when there's enough motion to trust a position —
+  // fires a movement-triggered capture once the tracked point has moved
+  // past the sensitivity threshold since the last capture.
+  function updateHeadTracking(now) {
+    if (!video.videoWidth) return;
+    trackCtx.drawImage(video, 0, 0, TRACK_W, TRACK_H);
+    var data = trackCtx.getImageData(0, 0, TRACK_W, TRACK_H).data;
+    var gray = new Float32Array(TRACK_W * TRACK_H);
+    for (var i = 0, p = 0; i < data.length; i += 4, p++) {
+      gray[p] = data[i] * 0.299 + data[i + 1] * 0.587 + data[i + 2] * 0.114;
+    }
+    if (prevGray) {
+      var sumX = 0, sumY = 0, sumW = 0;
+      for (var y = 0; y < TRACK_H; y++) {
+        for (var x = 0; x < TRACK_W; x++) {
+          var idx = y * TRACK_W + x;
+          var diff = Math.abs(gray[idx] - prevGray[idx]);
+          if (diff > MOTION_PIXEL_THRESHOLD) {
+            sumX += x * diff; sumY += y * diff; sumW += diff;
+          }
+        }
+      }
+      if (sumW > MOTION_MIN_ENERGY) {
+        var headPos = { x: sumX / sumW, y: sumY / sumW };
+        if (sequence.active && sequence.trigger === 'movement') {
+          if (!lastCapturePos) {
+            lastCapturePos = headPos;
+          } else {
+            var dx = headPos.x - lastCapturePos.x;
+            var dy = headPos.y - lastCapturePos.y;
+            var distNorm = Math.sqrt(dx * dx + dy * dy) / Math.max(TRACK_W, TRACK_H);
+            if (distNorm > sequence.sensitivity && (now - lastMotionCaptureAt) > MOTION_COOLDOWN_MS) {
+              lastMotionCaptureAt = now;
+              lastCapturePos = headPos;
+              triggerMovementCapture();
+            }
+          }
+        }
+      }
+    }
+    prevGray = gray;
+  }
 
   // Bayer matrices at a few sizes — bigger matrices give smoother, more
   // precise gradients; smaller ones a coarser, more graphic dot pattern.
@@ -669,7 +795,9 @@
     }
   }
 
-  function draw() {
+  function draw(now) {
+    updateHeadTracking(now);
+
     var vw = video.videoWidth || canvas.width;
     var vh = video.videoHeight || canvas.height;
     var sw = vw / zoom;

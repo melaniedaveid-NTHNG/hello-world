@@ -339,6 +339,17 @@
       Drag the video to rotate the shapes.
     </p>
 
+    <p class="section-title" style="margin-top: 0.25rem;">Movement</p>
+    <button id="hand-tracking-toggle" type="button">Hand Tracking</button>
+    <div class="setting-row" id="hand-move-row" style="display: none;">
+      <label for="hand-move-range">Move range</label>
+      <input type="range" id="hand-move-range" min="10" max="100" step="5" value="50">
+      <span class="value" id="hand-move-range-value">50%</span>
+    </div>
+    <p style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
+      Follows whatever is moving in frame (a hand, your head) — no separate camera needed.
+    </p>
+
     <p class="section-title" style="margin-top: 0.25rem;">Audio Reactive</p>
     <button id="audio-toggle" type="button">Enable microphone</button>
     <div id="audio-reactive-controls" style="display: none; flex-direction: column; gap: 0.75rem;">
@@ -358,6 +369,7 @@
       <div id="audio-target-row" style="display: flex; gap: 0.5rem; width: 100%;">
         <button id="audio-affect-pulse" class="active" type="button" style="flex: 1;">Pulse</button>
         <button id="audio-affect-rotation" class="active" type="button" style="flex: 1;">Rotation</button>
+        <button id="audio-affect-move" class="active" type="button" style="flex: 1;">Move</button>
       </div>
     </div>
     <p id="audio-status" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
@@ -503,6 +515,10 @@
   var shapePulseValue = document.getElementById('shape-pulse-value');
   var shapeRandomizeBtn = document.getElementById('shape-randomize');
   var shapesStatus = document.getElementById('shapes-status');
+  var handTrackingToggleBtn = document.getElementById('hand-tracking-toggle');
+  var handMoveRow = document.getElementById('hand-move-row');
+  var handMoveRangeInput = document.getElementById('hand-move-range');
+  var handMoveRangeValue = document.getElementById('hand-move-range-value');
   var audioToggleBtn = document.getElementById('audio-toggle');
   var audioReactiveControls = document.getElementById('audio-reactive-controls');
   var audioMeterFill = document.getElementById('audio-meter-fill');
@@ -512,6 +528,7 @@
   var audioSmoothingValue = document.getElementById('audio-smoothing-value');
   var audioAffectPulseBtn = document.getElementById('audio-affect-pulse');
   var audioAffectRotationBtn = document.getElementById('audio-affect-rotation');
+  var audioAffectMoveBtn = document.getElementById('audio-affect-move');
   var audioStatus = document.getElementById('audio-status');
   var zoomInput = document.getElementById('zoom');
   var zoomValue = document.getElementById('zoom-value');
@@ -602,16 +619,18 @@
   var shapeSpacing = 55; // percent of the visible frame half-width used as scatter radius
   var shapeRotationSpeed = 10;
   var shapePulse = 0.3; // base scale-pulse depth, 0-1
+  var handTrackingActive = false;
+  var handMoveRange = 0.5;
   var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
 
   // Audio reactivity: a Web Audio AnalyserNode sampled every frame drives
   // an overall level and a bass-band level, smoothed over time, which can
-  // then boost the shapes' pulse depth and/or rotation speed live.
+  // then boost the shapes' pulse depth, rotation speed, and/or position.
   var audio = {
     active: false,
     ctx: null, analyser: null, data: null,
     sensitivity: 1, smoothing: 0.6,
-    affectPulse: true, affectRotation: true,
+    affectPulse: true, affectRotation: true, affectMove: true,
     level: 0, bass: 0
   };
 
@@ -724,6 +743,28 @@
     var rx = t.drag.rotX;
     var pulseBoost = (audio.active && audio.affectPulse) ? audio.bass * audio.sensitivity : 0;
     var pulseDepth = Math.min(0.9, shapePulse + pulseBoost * 0.8);
+
+    // Moves the whole group: hand/motion tracking targets a screen
+    // position, audio adds a loudness-driven shake on top. Eased toward
+    // the target each frame (rather than snapping) so it stays smooth.
+    var fovRad = (SHAPE_CAMERA_FOV * Math.PI) / 180;
+    var visibleH = 2 * SHAPE_CAMERA_DISTANCE * Math.tan(fovRad / 2);
+    var visibleW = visibleH * t.camera.aspect;
+    var targetX = 0, targetY = 0;
+    if (handTrackingActive) {
+      var nx = (trackedPos.x - 0.5) * 2;
+      var ny = (trackedPos.y - 0.5) * 2;
+      targetX += nx * handMoveRange * visibleW * 0.5;
+      targetY += -ny * handMoveRange * visibleH * 0.5;
+    }
+    if (audio.active && audio.affectMove) {
+      var shakeAmount = audio.level * audio.sensitivity * visibleH * 0.12;
+      targetX += Math.sin(timeSeconds * 6.3) * shakeAmount;
+      targetY += Math.cos(timeSeconds * 4.7) * shakeAmount;
+    }
+    t.group.position.x += (targetX - t.group.position.x) * 0.15;
+    t.group.position.y += (targetY - t.group.position.y) * 0.15;
+
     for (var i = 0; i < t.group.children.length; i++) {
       var mesh = t.group.children[i];
       mesh.rotation.y = ry;
@@ -784,6 +825,10 @@
   var MOTION_COOLDOWN_MS = 120;
   var MOTION_PIXEL_THRESHOLD = 20;
   var MOTION_MIN_ENERGY = TRACK_W * TRACK_H * 0.35;
+  // Shared, smoothed motion-centroid position (0..1 normalized), also
+  // usable to move the 3D shapes — a stand-in for hand tracking without a
+  // full hand-landmark model: it just follows whatever is moving in frame.
+  var trackedPos = { x: 0.5, y: 0.5 };
 
   controls.querySelectorAll('button[data-effect]').forEach(function (btn) {
     btn.addEventListener('click', function () {
@@ -1103,6 +1148,16 @@
     if (shapesActive) rebuildShapes();
   });
 
+  handTrackingToggleBtn.addEventListener('click', function () {
+    handTrackingActive = !handTrackingActive;
+    handTrackingToggleBtn.classList.toggle('active', handTrackingActive);
+    handMoveRow.style.display = handTrackingActive ? '' : 'none';
+  });
+  handMoveRangeInput.addEventListener('input', function () {
+    handMoveRange = parseInt(handMoveRangeInput.value, 10) / 100;
+    handMoveRangeValue.textContent = handMoveRangeInput.value + '%';
+  });
+
   function setAudioStatus(text, isError) {
     audioStatus.textContent = text;
     audioStatus.style.color = isError ? '#ff5a1f' : '#888';
@@ -1151,6 +1206,10 @@
   audioAffectRotationBtn.addEventListener('click', function () {
     audio.affectRotation = !audio.affectRotation;
     audioAffectRotationBtn.classList.toggle('active', audio.affectRotation);
+  });
+  audioAffectMoveBtn.addEventListener('click', function () {
+    audio.affectMove = !audio.affectMove;
+    audioAffectMoveBtn.classList.toggle('active', audio.affectMove);
   });
 
   // Samples the analyser once per frame: an overall level (all bins) and a
@@ -1466,6 +1525,10 @@
       }
       if (sumW > MOTION_MIN_ENERGY) {
         var headPos = { x: sumX / sumW, y: sumY / sumW };
+        // Smoothed 0..1 normalized position, shared for shape movement.
+        var normX = headPos.x / TRACK_W, normY = headPos.y / TRACK_H;
+        trackedPos.x = trackedPos.x * 0.8 + normX * 0.2;
+        trackedPos.y = trackedPos.y * 0.8 + normY * 0.2;
         if (sequence.active && sequence.trigger === 'movement') {
           if (!lastCapturePos) {
             lastCapturePos = headPos;

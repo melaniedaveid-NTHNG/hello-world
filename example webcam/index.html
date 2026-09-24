@@ -271,6 +271,10 @@
       <input type="range" id="stripe-interval" min="100" max="3000" step="100" value="400">
       <span class="value" id="stripe-interval-value">400ms</span>
     </div>
+    <div class="setting-row">
+      <label for="stripe-loop">Loop</label>
+      <input type="checkbox" id="stripe-loop">
+    </div>
     <button id="stripe-capture" type="button">Capture</button>
     <p id="stripe-progress" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
   </div>
@@ -312,6 +316,7 @@
   var stripeCountValue = document.getElementById('stripe-count-value');
   var stripeIntervalInput = document.getElementById('stripe-interval');
   var stripeIntervalValue = document.getElementById('stripe-interval-value');
+  var stripeLoopInput = document.getElementById('stripe-loop');
   var stripeCaptureBtn = document.getElementById('stripe-capture');
   var stripeProgress = document.getElementById('stripe-progress');
 
@@ -328,6 +333,8 @@
 
   var sequence = {
     active: false,
+    loop: false,
+    cycle: 1,
     orientation: 'vertical',
     count: 8,
     interval: 400,
@@ -494,10 +501,16 @@
 
   function runCapture(index) {
     captureStripe(index);
-    stripeProgress.textContent = 'Captured ' + (index + 1) + ' of ' + sequence.count + '.';
+    var cycleLabel = sequence.loop ? ' (cycle ' + sequence.cycle + ')' : '';
+    stripeProgress.textContent = 'Captured ' + (index + 1) + ' of ' + sequence.count + cycleLabel + '.';
     if (index + 1 < sequence.count) {
-      stripeCaptureBtn.textContent = 'Cancel (' + (index + 1) + '/' + sequence.count + ')';
+      stripeCaptureBtn.textContent = sequence.loop ? 'Stop' : 'Cancel (' + (index + 1) + '/' + sequence.count + ')';
       sequence.timer = setTimeout(function () { runCapture(index + 1); }, sequence.interval);
+    } else if (sequence.loop) {
+      sequence.cycle++;
+      sequence.stripes = new Array(sequence.count).fill(null);
+      stripeCaptureBtn.textContent = 'Stop';
+      sequence.timer = setTimeout(function () { runCapture(0); }, sequence.interval);
     } else {
       sequence.active = false;
       sequence.timer = null;
@@ -509,6 +522,7 @@
   function setInputsDisabled(disabled) {
     stripeCountInput.disabled = disabled;
     stripeIntervalInput.disabled = disabled;
+    stripeLoopInput.disabled = disabled;
     orientationGroup.querySelectorAll('button').forEach(function (b) { b.disabled = disabled; });
   }
 
@@ -529,6 +543,8 @@
     }
     sequence.count = parseInt(stripeCountInput.value, 10);
     sequence.interval = parseInt(stripeIntervalInput.value, 10);
+    sequence.loop = stripeLoopInput.checked;
+    sequence.cycle = 1;
     sequence.stripes = new Array(sequence.count).fill(null);
     sequence.active = true;
     setInputsDisabled(true);

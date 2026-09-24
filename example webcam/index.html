@@ -346,11 +346,38 @@
       <input type="range" id="shape-point-size" min="2" max="24" step="1" value="6">
       <span class="value" id="shape-point-size-value">6</span>
     </div>
-    <button id="depth-map-toggle" class="active" type="button">Video Depth Map</button>
-    <div class="setting-row" id="depth-amount-row">
-      <label for="depth-amount">Depth amount</label>
-      <input type="range" id="depth-amount" min="0" max="100" step="5" value="60">
-      <span class="value" id="depth-amount-value">60</span>
+    <p class="section-title" style="margin-top: 0.25rem;">Light-Reactive Deformation</p>
+    <button id="depth-map-toggle" class="active" type="button">Light Reactive</button>
+    <div id="light-reactive-controls" style="display: flex; flex-direction: column; gap: 0.75rem;">
+      <div class="setting-row">
+        <label for="depth-amount">Strength</label>
+        <input type="range" id="depth-amount" min="0" max="100" step="5" value="55">
+        <span class="value" id="depth-amount-value">55</span>
+      </div>
+      <div class="setting-row">
+        <label for="depth-softness">Softness</label>
+        <input type="range" id="depth-softness" min="0" max="100" step="5" value="60">
+        <span class="value" id="depth-softness-value">60</span>
+      </div>
+      <div class="setting-row">
+        <label for="depth-speed">Response speed</label>
+        <input type="range" id="depth-speed" min="5" max="100" step="5" value="35">
+        <span class="value" id="depth-speed-value">35</span>
+      </div>
+      <div class="setting-row">
+        <label for="depth-midpoint">Midpoint</label>
+        <input type="range" id="depth-midpoint" min="0" max="100" step="5" value="50">
+        <span class="value" id="depth-midpoint-value">50</span>
+      </div>
+      <div id="depth-tool-row" style="display: flex; gap: 0.5rem; width: 100%;">
+        <button id="depth-invert" type="button" style="flex: 1;">Invert</button>
+        <button id="organic-motion-toggle" class="active" type="button" style="flex: 1;">Organic motion</button>
+      </div>
+      <div class="setting-row" id="organic-amount-row">
+        <label for="organic-amount">Organic amount</label>
+        <input type="range" id="organic-amount" min="0" max="100" step="5" value="40">
+        <span class="value" id="organic-amount-value">40</span>
+      </div>
     </div>
     <button id="shape-randomize" type="button">Randomize spread</button>
     <p id="shapes-status" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
@@ -536,8 +563,20 @@
   var shapePointSizeInput = document.getElementById('shape-point-size');
   var shapePointSizeValue = document.getElementById('shape-point-size-value');
   var depthMapToggleBtn = document.getElementById('depth-map-toggle');
+  var lightReactiveControls = document.getElementById('light-reactive-controls');
   var depthAmountInput = document.getElementById('depth-amount');
   var depthAmountValue = document.getElementById('depth-amount-value');
+  var depthSoftnessInput = document.getElementById('depth-softness');
+  var depthSoftnessValue = document.getElementById('depth-softness-value');
+  var depthSpeedInput = document.getElementById('depth-speed');
+  var depthSpeedValue = document.getElementById('depth-speed-value');
+  var depthMidpointInput = document.getElementById('depth-midpoint');
+  var depthMidpointValue = document.getElementById('depth-midpoint-value');
+  var depthInvertBtn = document.getElementById('depth-invert');
+  var organicMotionToggleBtn = document.getElementById('organic-motion-toggle');
+  var organicAmountRow = document.getElementById('organic-amount-row');
+  var organicAmountInput = document.getElementById('organic-amount');
+  var organicAmountValue = document.getElementById('organic-amount-value');
   var shapeRandomizeBtn = document.getElementById('shape-randomize');
   var shapesStatus = document.getElementById('shapes-status');
   var handTrackingToggleBtn = document.getElementById('hand-tracking-toggle');
@@ -649,7 +688,72 @@
   var shapeRenderStyle = 'solid'; // 'solid' | 'particles'
   var shapePointSize = 6;
   var depthMapActive = true;
-  var depthAmount = 0.6;
+  var depthAmount = 0.55; // displacement strength, 0-1
+  var depthSoftness = 0.6; // luminance-map blur amount, 0-1
+  var depthSpeed = 0.35; // temporal response speed, 0-1
+  var depthMidpoint = 0.5; // brightness level that leaves the surface unchanged
+  var depthInvert = false;
+  var organicMotionActive = true;
+  var organicAmount = 0.4;
+
+  // Luminance map: the live frame downsampled to a small grid and box-
+  // blurred every frame (cheap at this resolution) so displacement reads
+  // as soft rounded bulges/valleys rather than per-pixel spikes. The
+  // horizontal blur pass wraps around, matching the circular longitude
+  // coordinate used to sample it, so there's no seam crack.
+  var LUM_GRID = 48;
+  var lumSmallCanvas = document.createElement('canvas');
+  lumSmallCanvas.width = LUM_GRID;
+  lumSmallCanvas.height = LUM_GRID;
+  var lumSmallCtx = lumSmallCanvas.getContext('2d', { willReadFrequently: true });
+  var lumRaw = new Float32Array(LUM_GRID * LUM_GRID);
+  var luminanceGrid = new Float32Array(LUM_GRID * LUM_GRID);
+
+  function boxBlur2D(src, w, h, radius, out) {
+    if (radius <= 0) {
+      out.set(src);
+      return out;
+    }
+    var tmp = new Float32Array(w * h);
+    var x, y, k, sum, count, xx, yy;
+    for (y = 0; y < h; y++) {
+      for (x = 0; x < w; x++) {
+        sum = 0; count = 0;
+        for (k = -radius; k <= radius; k++) {
+          xx = ((x + k) % w + w) % w; // wrap horizontally (circular longitude)
+          sum += src[y * w + xx]; count++;
+        }
+        tmp[y * w + x] = sum / count;
+      }
+    }
+    for (x = 0; x < w; x++) {
+      for (y = 0; y < h; y++) {
+        sum = 0; count = 0;
+        for (k = -radius; k <= radius; k++) {
+          yy = Math.min(h - 1, Math.max(0, y + k)); // clamp vertically (poles)
+          sum += tmp[yy * w + x]; count++;
+        }
+        out[y * w + x] = sum / count;
+      }
+    }
+    return out;
+  }
+
+  function sampleLuminance(u, v) {
+    var gx = u * (LUM_GRID - 1);
+    var gy = v * (LUM_GRID - 1);
+    var x0 = Math.floor(gx), y0 = Math.floor(gy);
+    var x1 = (x0 + 1) % LUM_GRID;
+    var y1 = Math.min(LUM_GRID - 1, y0 + 1);
+    var fx = gx - x0, fy = gy - y0;
+    var v00 = luminanceGrid[y0 * LUM_GRID + x0];
+    var v10 = luminanceGrid[y0 * LUM_GRID + x1];
+    var v01 = luminanceGrid[y1 * LUM_GRID + x0];
+    var v11 = luminanceGrid[y1 * LUM_GRID + x1];
+    var top = v00 + (v10 - v00) * fx;
+    var bot = v01 + (v11 - v01) * fx;
+    return top + (bot - top) * fy;
+  }
   var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
 
   // Audio reactivity: a Web Audio AnalyserNode sampled every frame drives
@@ -678,6 +782,14 @@
     texture.minFilter = THREE.LinearFilter;
     var group = new THREE.Group();
     scene.add(group);
+    // Soft, non-harsh lighting — a hemisphere fill plus one gentle
+    // directional light — so the sculpted bulges/valleys actually read as
+    // shaded form instead of a flat unlit texture wrap.
+    var hemiLight = new THREE.HemisphereLight(0xffffff, 0x2a2a2a, 1.0);
+    scene.add(hemiLight);
+    var keyLight = new THREE.DirectionalLight(0xffffff, 0.55);
+    keyLight.position.set(0.6, 0.8, 1);
+    scene.add(keyLight);
     three = {
       renderer: renderer, scene: scene, camera: camera, texture: texture, group: group,
       autoAngle: 0, lastTime: 0, drag: { active: false, x: 0, y: 0, rotX: 0, rotY: 0 }
@@ -703,13 +815,33 @@
       + Math.sin(z * 0.025 - seed * 1.3 + t * 0.4) * 0.4;
   }
 
-  // Icosahedra read as organic blobs; boxes get extra subdivisions so the
-  // same vertex-noise displacement can round and warp their faces too,
-  // instead of staying perfectly flat/geometric.
+  // A densely subdivided icosahedron reads as a smooth sphere even after
+  // heavy displacement — low detail would facet visibly once bulged.
+  // Boxes get many segments plus a corner-rounding blend toward a
+  // circumscribed sphere (a cheap superellipsoid-style round, since r128
+  // has no built-in RoundedBoxGeometry), so they can deform smoothly too
+  // instead of tearing at sharp edges.
   function buildOrganicGeometry(kind, size) {
-    return kind === 'box'
-      ? new THREE.BoxGeometry(size, size, size, 6, 6, 6)
-      : new THREE.IcosahedronGeometry(size / 2, 2);
+    if (kind === 'box') {
+      var geo = new THREE.BoxGeometry(size, size, size, 12, 12, 12);
+      var pos = geo.attributes.position;
+      var half = size / 2;
+      var roundAmount = 0.45;
+      for (var i = 0; i < pos.count; i++) {
+        var x = pos.getX(i), y = pos.getY(i), z = pos.getZ(i);
+        var len = Math.sqrt(x * x + y * y + z * z) || 1;
+        var sx = (x / len) * half, sy = (y / len) * half, sz = (z / len) * half;
+        pos.setXYZ(i,
+          x * (1 - roundAmount) + sx * roundAmount,
+          y * (1 - roundAmount) + sy * roundAmount,
+          z * (1 - roundAmount) + sz * roundAmount
+        );
+      }
+      pos.needsUpdate = true;
+      geo.computeVertexNormals();
+      return geo;
+    }
+    return new THREE.IcosahedronGeometry(size / 2, 4);
   }
 
   // Scatters shapes of varied size across the frame the camera actually
@@ -747,7 +879,7 @@
         });
         mesh = new THREE.Points(geometry, pointsMaterial);
       } else {
-        var meshMaterial = new THREE.MeshBasicMaterial({ map: t.texture });
+        var meshMaterial = new THREE.MeshStandardMaterial({ map: t.texture, roughness: 0.55, metalness: 0.05 });
         mesh = new THREE.Mesh(geometry, meshMaterial);
       }
 
@@ -763,6 +895,27 @@
       mesh.userData.noiseSeed = Math.random() * 1000;
       mesh.userData.noiseAmount = size * 0.16;
       mesh.userData.depthScale = size * 0.5;
+      // A continuous longitude/latitude UV derived from each vertex's own
+      // direction from center — computed once here from the base geometry
+      // rather than read from the mesh's built-in UV attribute, which (on
+      // an icosahedron especially) duplicates vertices along a seam with
+      // different UVs. This keeps the *displacement* sampling seamless and
+      // well-behaved at the poles; the real geometry UV is untouched and
+      // still used for the video texture's on-screen appearance.
+      var vertexCount2 = geometry.attributes.position.count;
+      var sphereUV = new Float32Array(vertexCount2 * 2);
+      var basePos = mesh.userData.basePositions;
+      for (var v0 = 0; v0 < vertexCount2; v0++) {
+        var ix0 = v0 * 3;
+        var bx0 = basePos[ix0], by0 = basePos[ix0 + 1], bz0 = basePos[ix0 + 2];
+        var len0 = Math.sqrt(bx0 * bx0 + by0 * by0 + bz0 * bz0) || 1;
+        var theta = Math.atan2(bz0 / len0, bx0 / len0);
+        var phi = Math.acos(Math.max(-1, Math.min(1, by0 / len0)));
+        sphereUV[v0 * 2] = theta / (Math.PI * 2) + 0.5;
+        sphereUV[v0 * 2 + 1] = 1 - phi / Math.PI;
+      }
+      mesh.userData.sphereUV = sphereUV;
+      mesh.userData.displacement = new Float32Array(vertexCount2); // temporal smoothing state
       t.group.add(mesh);
     }
   }
@@ -809,13 +962,23 @@
     t.group.position.x += (targetX - t.group.position.x) * 0.15;
     t.group.position.y += (targetY - t.group.position.y) * 0.15;
 
-    // One readback of the current frame per animation frame (not per shape)
-    // — needed whenever vertices displace by brightness (Depth map) or
-    // particles sample their color from the video.
+    // One readback of the current frame per animation frame (not per shape):
+    // a full-res sample for particle color, and a small downsampled +
+    // box-blurred luminance grid for the light-reactive displacement (so
+    // it reads as soft rounded bulges, not per-pixel spikes).
     var videoDepthData = null;
     var depthW = canvas.width, depthH = canvas.height;
-    if (depthMapActive || shapeRenderStyle === 'particles') {
+    if (shapeRenderStyle === 'particles') {
       videoDepthData = ctx.getImageData(0, 0, depthW, depthH).data;
+    }
+    if (depthMapActive) {
+      lumSmallCtx.drawImage(canvas, 0, 0, LUM_GRID, LUM_GRID);
+      var lumPix = lumSmallCtx.getImageData(0, 0, LUM_GRID, LUM_GRID).data;
+      for (var lp = 0, li = 0; lp < lumPix.length; lp += 4, li++) {
+        lumRaw[li] = (lumPix[lp] * 0.299 + lumPix[lp + 1] * 0.587 + lumPix[lp + 2] * 0.114) / 255;
+      }
+      var blurRadius = Math.round(depthSoftness * 7);
+      boxBlur2D(lumRaw, LUM_GRID, LUM_GRID, blurRadius, luminanceGrid);
     }
 
     for (var i = 0; i < t.group.children.length; i++) {
@@ -828,43 +991,48 @@
       mesh.scale.setScalar(pulseScale);
 
       var base = mesh.userData.basePositions;
-      var amount = mesh.userData.noiseAmount;
+      var amount = mesh.userData.noiseAmount * organicAmount * 2.5;
       var depthScale = mesh.userData.depthScale;
       var uvs = mesh.userData.uvs;
+      var sphereUV = mesh.userData.sphereUV;
+      var displacement = mesh.userData.displacement;
       var pos = mesh.geometry.attributes.position;
       var colorAttr = mesh.isPoints ? mesh.geometry.attributes.color : null;
       for (var v = 0; v < pos.count; v++) {
         var ix = v * 3;
         var bx = base[ix], by = base[ix + 1], bz = base[ix + 2];
         var len = Math.sqrt(bx * bx + by * by + bz * bz) || 1;
-        var n = organicNoise(bx, by, bz, seed, timeSeconds) * amount;
+        var n = organicMotionActive ? organicNoise(bx, by, bz, seed, timeSeconds) * amount : 0;
 
-        if (videoDepthData) {
-          // The video itself is the depth map: sample the pixel this vertex's
-          // UV lands on and push the vertex outward along its own normal in
-          // proportion to brightness — bright/lit parts of frame extrude the
-          // surface further, so the geometry reads as extending toward the
-          // camera like a field of particles rather than a flat wrap.
+        if (depthMapActive) {
+          // The video itself is the depth map: sample the blurred luminance
+          // grid at this vertex's continuous spherical UV and ease its
+          // stored displacement toward the target — smoothing both the map
+          // (softness) and the change over time (response speed) so lit
+          // areas gradually bulge outward, dark areas gradually sink in
+          // (or the reverse, with Invert), rather than flickering per frame.
+          var lum = sampleLuminance(sphereUV[v * 2], sphereUV[v * 2 + 1]);
+          var delta = (lum - depthMidpoint) * (depthInvert ? -1 : 1);
+          var target = delta * depthScale * depthAmount * 2;
+          displacement[v] += (target - displacement[v]) * depthSpeed;
+          n += displacement[v];
+        }
+
+        if (colorAttr && videoDepthData) {
           var u = uvs[v * 2], vv = uvs[v * 2 + 1];
           var px = Math.min(depthW - 1, Math.max(0, (u * depthW) | 0));
           var py = Math.min(depthH - 1, Math.max(0, ((1 - vv) * depthH) | 0));
           var pidx = (py * depthW + px) * 4;
-          var r = videoDepthData[pidx], g = videoDepthData[pidx + 1], b = videoDepthData[pidx + 2];
-          if (depthMapActive) {
-            var brightness = (r + g + b) / 765;
-            n += brightness * depthScale * depthAmount;
-          }
-          if (colorAttr) {
-            colorAttr.array[ix] = r / 255;
-            colorAttr.array[ix + 1] = g / 255;
-            colorAttr.array[ix + 2] = b / 255;
-          }
+          colorAttr.array[ix] = videoDepthData[pidx] / 255;
+          colorAttr.array[ix + 1] = videoDepthData[pidx + 1] / 255;
+          colorAttr.array[ix + 2] = videoDepthData[pidx + 2] / 255;
         }
 
         pos.setXYZ(v, bx + (bx / len) * n, by + (by / len) * n, bz + (bz / len) * n);
       }
       pos.needsUpdate = true;
       if (colorAttr) colorAttr.needsUpdate = true;
+      if (!mesh.isPoints) mesh.geometry.computeVertexNormals(); // re-shade the sculpted surface under the lights
     }
     t.renderer.render(t.scene, t.camera);
   }
@@ -1248,10 +1416,36 @@
   depthMapToggleBtn.addEventListener('click', function () {
     depthMapActive = !depthMapActive;
     depthMapToggleBtn.classList.toggle('active', depthMapActive);
+    lightReactiveControls.style.display = depthMapActive ? 'flex' : 'none';
   });
   depthAmountInput.addEventListener('input', function () {
     depthAmount = parseInt(depthAmountInput.value, 10) / 100;
     depthAmountValue.textContent = depthAmountInput.value;
+  });
+  depthSoftnessInput.addEventListener('input', function () {
+    depthSoftness = parseInt(depthSoftnessInput.value, 10) / 100;
+    depthSoftnessValue.textContent = depthSoftnessInput.value;
+  });
+  depthSpeedInput.addEventListener('input', function () {
+    depthSpeed = parseInt(depthSpeedInput.value, 10) / 100;
+    depthSpeedValue.textContent = depthSpeedInput.value;
+  });
+  depthMidpointInput.addEventListener('input', function () {
+    depthMidpoint = parseInt(depthMidpointInput.value, 10) / 100;
+    depthMidpointValue.textContent = depthMidpointInput.value;
+  });
+  depthInvertBtn.addEventListener('click', function () {
+    depthInvert = !depthInvert;
+    depthInvertBtn.classList.toggle('active', depthInvert);
+  });
+  organicMotionToggleBtn.addEventListener('click', function () {
+    organicMotionActive = !organicMotionActive;
+    organicMotionToggleBtn.classList.toggle('active', organicMotionActive);
+    organicAmountRow.style.display = organicMotionActive ? '' : 'none';
+  });
+  organicAmountInput.addEventListener('input', function () {
+    organicAmount = parseInt(organicAmountInput.value, 10) / 100;
+    organicAmountValue.textContent = organicAmountInput.value;
   });
   shapeRandomizeBtn.addEventListener('click', function () {
     if (shapesActive) rebuildShapes();

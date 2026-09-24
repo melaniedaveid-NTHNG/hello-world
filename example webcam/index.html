@@ -269,8 +269,8 @@
     </div>
     <div class="setting-row">
       <label for="shape-size">Size</label>
-      <input type="range" id="shape-size" min="30" max="250" step="5" value="100">
-      <span class="value" id="shape-size-value">100</span>
+      <input type="range" id="shape-size" min="30" max="600" step="10" value="220">
+      <span class="value" id="shape-size-value">220</span>
     </div>
     <div class="setting-row">
       <label for="shape-spacing">Spacing</label>
@@ -472,14 +472,15 @@
   var shapesActive = false;
   var shapeType = 'sphere';
   var shapeCount = 4;
-  var shapeSize = 100;
+  var shapeSize = 220;
   var shapeSpacing = 180;
   var shapeRotationSpeed = 10;
   var three = null; // lazily initialized: { renderer, scene, camera, texture, group, autoAngle, drag }
 
   function ensureThree() {
     if (three || typeof THREE === 'undefined') return three;
-    var renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, preserveDrawingBuffer: true });
+    var renderer = new THREE.WebGLRenderer({ canvas: threeCanvas, antialias: true, preserveDrawingBuffer: true, alpha: true });
+    renderer.setClearColor(0x000000, 0);
     var scene = new THREE.Scene();
     var camera = new THREE.PerspectiveCamera(50, 1, 1, 5000);
     var texture = new THREE.CanvasTexture(canvas);
@@ -627,8 +628,13 @@
   function captureFreeze() {
     freezeCanvas.width = canvas.width;
     freezeCanvas.height = canvas.height;
-    var source = (shapesActive && three) ? threeCanvas : canvas;
-    freezeCtx.drawImage(source, 0, 0, freezeCanvas.width, freezeCanvas.height);
+    freezeCtx.drawImage(canvas, 0, 0, freezeCanvas.width, freezeCanvas.height);
+    if (shapesActive && three) {
+      // The shapes canvas has a transparent background now (so the video
+      // shows through live), so it composites on top of the video frame
+      // just drawn above instead of replacing it.
+      freezeCtx.drawImage(threeCanvas, 0, 0, freezeCanvas.width, freezeCanvas.height);
+    }
     hasFreezeFrame = true;
   }
   freezeBtn.addEventListener('click', function () {
@@ -951,6 +957,9 @@
     if (shapesActive && three) {
       captureBuffer.width = w;
       captureBuffer.height = h;
+      // Video background first, then the shapes (transparent where there's
+      // no geometry) composited on top — matches what's on screen.
+      captureBufferCtx.drawImage(canvas, 0, 0, w, h);
       captureBufferCtx.drawImage(threeCanvas, 0, 0, w, h);
       pixelSource = captureBufferCtx;
     }

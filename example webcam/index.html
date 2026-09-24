@@ -74,6 +74,51 @@
     border-color: #fff;
     color: #000;
   }
+  #dither-settings {
+    display: none;
+    flex-direction: column;
+    gap: 0.75rem;
+    width: min(420px, 90vw);
+    padding: 1rem 1.25rem;
+    border: 1px solid #333;
+    border-radius: 12px;
+  }
+  #dither-settings.visible { display: flex; }
+  .setting-row {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+  .setting-row label {
+    font-size: 0.85rem;
+    font-weight: 300;
+    color: #d8d8d8;
+    white-space: nowrap;
+  }
+  .setting-row .value {
+    font-size: 0.8rem;
+    color: #888;
+    min-width: 2ch;
+    text-align: right;
+  }
+  .pill-group {
+    display: flex;
+    gap: 0.4rem;
+  }
+  .pill-group button {
+    padding: 0.3rem 0.7rem;
+    font-size: 0.8rem;
+  }
+  input[type="range"] {
+    flex: 1;
+    accent-color: #ff5a1f;
+  }
+  input[type="checkbox"] {
+    accent-color: #ff5a1f;
+    width: 16px;
+    height: 16px;
+  }
 </style>
 </head>
 <body>
@@ -95,6 +140,31 @@
   <button id="mirror">Mirror</button>
 </div>
 
+<div id="dither-settings">
+  <div class="setting-row">
+    <label>Matrix</label>
+    <div class="pill-group" id="matrix-group">
+      <button data-matrix="2" type="button">2×2</button>
+      <button data-matrix="4" type="button">4×4</button>
+      <button data-matrix="8" class="active" type="button">8×8</button>
+    </div>
+  </div>
+  <div class="setting-row">
+    <label for="block-size">Pixel size</label>
+    <input type="range" id="block-size" min="1" max="10" step="1" value="1">
+    <span class="value" id="block-size-value">1</span>
+  </div>
+  <div class="setting-row">
+    <label for="brightness">Brightness</label>
+    <input type="range" id="brightness" min="-50" max="50" step="1" value="0">
+    <span class="value" id="brightness-value">0</span>
+  </div>
+  <div class="setting-row">
+    <label for="color-dither">Color dither</label>
+    <input type="checkbox" id="color-dither">
+  </div>
+</div>
+
 <script>
 (function () {
   var video = document.getElementById('video');
@@ -103,15 +173,24 @@
   var statusEl = document.getElementById('status');
   var controls = document.getElementById('controls');
   var mirrorBtn = document.getElementById('mirror');
+  var ditherSettings = document.getElementById('dither-settings');
+  var matrixGroup = document.getElementById('matrix-group');
+  var blockSizeInput = document.getElementById('block-size');
+  var blockSizeValue = document.getElementById('block-size-value');
+  var brightnessInput = document.getElementById('brightness');
+  var brightnessValue = document.getElementById('brightness-value');
+  var colorDitherInput = document.getElementById('color-dither');
 
   var effect = 'normal';
   var mirrored = true;
+  var dither = { matrixSize: 8, blockSize: 1, brightness: 0, color: false };
 
   controls.querySelectorAll('button[data-effect]').forEach(function (btn) {
     btn.addEventListener('click', function () {
       controls.querySelectorAll('button[data-effect]').forEach(function (b) { b.classList.remove('active'); });
       btn.classList.add('active');
       effect = btn.dataset.effect;
+      ditherSettings.classList.toggle('visible', effect === 'dither');
     });
   });
   mirrorBtn.addEventListener('click', function () {
@@ -120,17 +199,44 @@
   });
   mirrorBtn.classList.add('active');
 
-  // 8x8 Bayer matrix, reused from the main page's dither look.
-  var BAYER = [
-     0, 32,  8, 40,  2, 34, 10, 42,
-    48, 16, 56, 24, 50, 18, 58, 26,
-    12, 44,  4, 36, 14, 46,  6, 38,
-    60, 28, 52, 20, 62, 30, 54, 22,
-     3, 35, 11, 43,  1, 33,  9, 41,
-    51, 19, 59, 27, 49, 17, 57, 25,
-    15, 47,  7, 39, 13, 45,  5, 37,
-    63, 31, 55, 23, 61, 29, 53, 21
-  ].map(function (v) { return ((v + 0.5) / 64) * 255; });
+  matrixGroup.querySelectorAll('button[data-matrix]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      matrixGroup.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      dither.matrixSize = parseInt(btn.dataset.matrix, 10);
+    });
+  });
+  blockSizeInput.addEventListener('input', function () {
+    dither.blockSize = parseInt(blockSizeInput.value, 10);
+    blockSizeValue.textContent = blockSizeInput.value;
+  });
+  brightnessInput.addEventListener('input', function () {
+    dither.brightness = parseInt(brightnessInput.value, 10);
+    brightnessValue.textContent = brightnessInput.value;
+  });
+  colorDitherInput.addEventListener('change', function () {
+    dither.color = colorDitherInput.checked;
+  });
+
+  // Bayer matrices at a few sizes — bigger matrices give smoother, more
+  // precise gradients; smaller ones a coarser, more graphic dot pattern.
+  function buildBayer(raw, n) {
+    return raw.map(function (v) { return ((v + 0.5) / (n * n)) * 255; });
+  }
+  var BAYER_MATRICES = {
+    2: buildBayer([0, 2, 3, 1], 2),
+    4: buildBayer([0, 8, 2, 10, 12, 4, 14, 6, 3, 11, 1, 9, 15, 7, 13, 5], 4),
+    8: buildBayer([
+       0, 32,  8, 40,  2, 34, 10, 42,
+      48, 16, 56, 24, 50, 18, 58, 26,
+      12, 44,  4, 36, 14, 46,  6, 38,
+      60, 28, 52, 20, 62, 30, 54, 22,
+       3, 35, 11, 43,  1, 33,  9, 41,
+      51, 19, 59, 27, 49, 17, 57, 25,
+      15, 47,  7, 39, 13, 45,  5, 37,
+      63, 31, 55, 23, 61, 29, 53, 21
+    ], 8)
+  };
 
   function applyEffect(imageData) {
     var data = imageData.data;
@@ -157,13 +263,48 @@
         data[i3 + 2] = Math.min(255, r * 0.272 + g2 * 0.534 + b * 0.131);
       }
     } else if (effect === 'dither') {
-      for (var p = 0; p < data.length; p += 4) {
-        var px = (p / 4) % w;
-        var py = Math.floor((p / 4) / w);
-        var lum = data[p] * 0.299 + data[p + 1] * 0.587 + data[p + 2] * 0.114;
-        var threshold = BAYER[(py & 7) * 8 + (px & 7)];
-        var v = lum > threshold ? 255 : 0;
-        data[p] = data[p + 1] = data[p + 2] = v;
+      var h0 = imageData.height;
+      var matrix = BAYER_MATRICES[dither.matrixSize];
+      var msize = dither.matrixSize;
+      var block = Math.max(1, dither.blockSize);
+      var bias = dither.brightness * 2.55;
+
+      for (var by = 0; by < h0; by += block) {
+        var byEnd = Math.min(by + block, h0);
+        for (var bx = 0; bx < w; bx += block) {
+          var bxEnd = Math.min(bx + block, w);
+          var rSum = 0, gSum = 0, bSum = 0, count = 0;
+          for (var yy = by; yy < byEnd; yy++) {
+            for (var xx = bx; xx < bxEnd; xx++) {
+              var si = (yy * w + xx) * 4;
+              rSum += data[si]; gSum += data[si + 1]; bSum += data[si + 2];
+              count++;
+            }
+          }
+          var rAvg = rSum / count + bias;
+          var gAvg = gSum / count + bias;
+          var bAvg = bSum / count + bias;
+          var mi = ((by / block | 0) % msize) * msize + ((bx / block | 0) % msize);
+          var threshold = matrix[mi];
+
+          var rOut, gOut, bOut;
+          if (dither.color) {
+            rOut = rAvg > threshold ? 255 : 0;
+            gOut = gAvg > threshold ? 255 : 0;
+            bOut = bAvg > threshold ? 255 : 0;
+          } else {
+            var lumAvg = rAvg * 0.299 + gAvg * 0.587 + bAvg * 0.114;
+            var v = lumAvg > threshold ? 255 : 0;
+            rOut = gOut = bOut = v;
+          }
+
+          for (var yy2 = by; yy2 < byEnd; yy2++) {
+            for (var xx2 = bx; xx2 < bxEnd; xx2++) {
+              var di2 = (yy2 * w + xx2) * 4;
+              data[di2] = rOut; data[di2 + 1] = gOut; data[di2 + 2] = bOut;
+            }
+          }
+        }
       }
     } else if (effect === 'edges') {
       var src = new Uint8ClampedArray(data);

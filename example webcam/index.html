@@ -395,6 +395,38 @@
       Follows whatever is moving in frame (a hand, your head) — no separate camera needed.
     </p>
 
+    <p class="section-title" style="margin-top: 0.25rem;">Hand Gesture Control</p>
+    <button id="gesture-toggle" type="button">Enable Gesture Control</button>
+    <div id="gesture-controls" style="display: none; flex-direction: column; gap: 0.75rem;">
+      <div id="gesture-mode-row" style="display: flex; gap: 0.5rem; width: 100%;">
+        <button data-gesture-mode="move" class="active" type="button" style="flex: 1;">Move</button>
+        <button data-gesture-mode="sculpt" type="button" style="flex: 1;">Sculpt</button>
+      </div>
+      <div class="setting-row">
+        <label for="sculpt-radius">Sculpt radius</label>
+        <input type="range" id="sculpt-radius" min="10" max="100" step="5" value="40">
+        <span class="value" id="sculpt-radius-value">40</span>
+      </div>
+      <div class="setting-row">
+        <label for="sculpt-strength">Sculpt strength</label>
+        <input type="range" id="sculpt-strength" min="10" max="100" step="5" value="60">
+        <span class="value" id="sculpt-strength-value">60</span>
+      </div>
+      <div class="setting-row">
+        <label for="sculpt-elasticity">Elasticity</label>
+        <input type="range" id="sculpt-elasticity" min="0" max="100" step="5" value="30">
+        <span class="value" id="sculpt-elasticity-value">30</span>
+      </div>
+      <button id="sculpt-reset" type="button">Reset shape</button>
+      <p style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;">
+        Pinch thumb + index finger over a shape to grab (Move) or sculpt. Two
+        hands pinching the same shape stretch/rotate it. No camera for hand
+        tracking? Click-drag works the same way; two-finger touch does the
+        two-hand gestures.
+      </p>
+    </div>
+    <p id="gesture-status" style="font-size: 0.78rem; font-weight: 300; color: #888; margin: 0;"></p>
+
     <p class="section-title" style="margin-top: 0.25rem;">Audio Reactive</p>
     <button id="audio-toggle" type="button">Enable microphone</button>
     <div id="audio-reactive-controls" style="display: none; flex-direction: column; gap: 0.75rem;">
@@ -583,6 +615,17 @@
   var handMoveRow = document.getElementById('hand-move-row');
   var handMoveRangeInput = document.getElementById('hand-move-range');
   var handMoveRangeValue = document.getElementById('hand-move-range-value');
+  var gestureToggleBtn = document.getElementById('gesture-toggle');
+  var gestureControls = document.getElementById('gesture-controls');
+  var gestureModeRow = document.getElementById('gesture-mode-row');
+  var sculptRadiusInput = document.getElementById('sculpt-radius');
+  var sculptRadiusValue = document.getElementById('sculpt-radius-value');
+  var sculptStrengthInput = document.getElementById('sculpt-strength');
+  var sculptStrengthValue = document.getElementById('sculpt-strength-value');
+  var sculptElasticityInput = document.getElementById('sculpt-elasticity');
+  var sculptElasticityValue = document.getElementById('sculpt-elasticity-value');
+  var sculptResetBtn = document.getElementById('sculpt-reset');
+  var gestureStatus = document.getElementById('gesture-status');
   var audioToggleBtn = document.getElementById('audio-toggle');
   var audioReactiveControls = document.getElementById('audio-reactive-controls');
   var audioMeterFill = document.getElementById('audio-meter-fill');
@@ -685,6 +728,54 @@
   var shapePulse = 0.3; // base scale-pulse depth, 0-1
   var handTrackingActive = false;
   var handMoveRange = 0.5;
+
+  // Hand gesture control: real pinch/grab manipulation of individual
+  // shapes, distinct from the whole-group "Hand Tracking" above. Needs
+  // actual finger-landmark tracking (MediaPipe HandLandmarker, loaded from
+  // CDN on demand) — a motion centroid alone can't detect a pinch. Falls
+  // back to mouse/touch (which drives the exact same `hands[]` state and
+  // gesture state machine) if the model/WASM fails to load.
+  var gestureActive = false;
+  var gestureMode = 'move'; // 'move' | 'sculpt'
+  var sculptRadiusPct = 0.4;
+  var sculptStrengthPct = 0.6;
+  var sculptElasticityPct = 0.3;
+  var handLandmarker = null;
+  var gestureLoading = false;
+  var usingFallbackPointer = false;
+
+  function makeHandState() {
+    return {
+      present: false, pinching: false, pinchStart: false, pinchEnd: false,
+      pos: { x: 0.5, y: 0.5 }, // smoothed, normalized 0..1, mirror-corrected
+      grabbedMesh: null, grabOffset: null, grabDistance: 0,
+      sculptMesh: null, sculptLocalPoint: null, sculptStartDepth: 0, currentPull: 0,
+      _pointerId: null // mouse/touch fallback only
+    };
+  }
+  var hands = [makeHandState(), makeHandState()];
+
+  function setGestureStatus(text, isError) {
+    gestureStatus.textContent = text;
+    gestureStatus.style.color = isError ? '#ff5a1f' : '#888';
+  }
+
+  function releaseGrab(h) {
+    h.grabbedMesh = null;
+    h.grabOffset = null;
+  }
+  function endSculpt(h) {
+    h.sculptMesh = null;
+    h.sculptLocalPoint = null;
+    h.currentPull = 0;
+  }
+  function highlightMesh(mesh, on) {
+    if (mesh.isPoints) {
+      mesh.material.size = on ? shapePointSize * 1.6 : shapePointSize;
+    } else if (mesh.material.emissive) {
+      mesh.material.emissive.setHex(on ? 0x662200 : 0x000000);
+    }
+  }
   var shapeRenderStyle = 'solid'; // 'solid' | 'particles'
   var shapePointSize = 6;
   var depthMapActive = true;
@@ -790,8 +881,26 @@
     var keyLight = new THREE.DirectionalLight(0xffffff, 0.55);
     keyLight.position.set(0.6, 0.8, 1);
     scene.add(keyLight);
+    var raycaster = new THREE.Raycaster();
+    raycaster.params.Points.threshold = 25;
+    // Small pinch-point cursors, added to the scene directly (not the
+    // rotating/scaling shapes group) so they track hand position
+    // independent of shape transforms. A flat CircleGeometry in the XY
+    // plane faces the camera without any billboard math needed here.
+    var cursorGeo = new THREE.CircleGeometry(14, 20);
+    var cursors = [
+      new THREE.Mesh(cursorGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest: false })),
+      new THREE.Mesh(cursorGeo, new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.85, depthTest: false }))
+    ];
+    cursors[0].visible = false;
+    cursors[1].visible = false;
+    cursors[0].renderOrder = 999;
+    cursors[1].renderOrder = 999;
+    scene.add(cursors[0]);
+    scene.add(cursors[1]);
     three = {
-      renderer: renderer, scene: scene, camera: camera, texture: texture, group: group,
+      renderer: renderer, scene: scene, camera: camera, texture: texture, group: group, raycaster: raycaster,
+      cursors: cursors,
       autoAngle: 0, lastTime: 0, drag: { active: false, x: 0, y: 0, rotX: 0, rotY: 0 }
     };
     return three;
@@ -915,9 +1024,196 @@
         sphereUV[v0 * 2 + 1] = 1 - phi / Math.PI;
       }
       mesh.userData.sphereUV = sphereUV;
+      mesh.userData.baseScale = new THREE.Vector3(1, 1, 1); // set by two-hand stretch; combined with Pulse each frame
       mesh.userData.displacement = new Float32Array(vertexCount2); // temporal smoothing state
+      mesh.userData.sculptDisplacement = new Float32Array(vertexCount2); // hand-sculpted bulges, decays via Elasticity
       t.group.add(mesh);
     }
+  }
+
+  function loadHandLandmarker() {
+    if (handLandmarker || gestureLoading) return;
+    gestureLoading = true;
+    setGestureStatus('Loading hand tracking model…');
+    import('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14')
+      .then(function (visionModule) {
+        return visionModule.FilesetResolver.forVisionTasks(
+          'https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm'
+        ).then(function (filesetResolver) {
+          return visionModule.HandLandmarker.createFromOptions(filesetResolver, {
+            baseOptions: {
+              modelAssetPath: 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',
+              delegate: 'GPU'
+            },
+            runningMode: 'VIDEO',
+            numHands: 2
+          });
+        });
+      })
+      .then(function (landmarker) {
+        handLandmarker = landmarker;
+        gestureLoading = false;
+        usingFallbackPointer = false;
+        setGestureStatus('Hand tracking ready — pinch thumb + index finger over a shape.');
+      })
+      .catch(function (err) {
+        gestureLoading = false;
+        usingFallbackPointer = true;
+        setGestureStatus('Hand tracking unavailable (' + err.message + ') — using click/touch instead.', true);
+      });
+  }
+
+  // Unprojects a normalized (0..1, mirror-corrected) screen position to a
+  // 3D world point at a given distance from the camera — used to move a
+  // grabbed shape at the same depth it was grabbed at, since monocular
+  // hand tracking doesn't give a reliable metric depth to push/pull with.
+  function normalizedToWorldAtDistance(normPos, distance) {
+    var ndcX = normPos.x * 2 - 1;
+    var ndcY = -(normPos.y * 2 - 1);
+    var vec = new THREE.Vector3(ndcX, ndcY, 0.5);
+    vec.unproject(three.camera);
+    var dir = vec.sub(three.camera.position).normalize();
+    return three.camera.position.clone().add(dir.multiplyScalar(distance));
+  }
+
+  function raycastFromNormalized(normPos) {
+    var t = three;
+    if (!t) return null;
+    var ndcX = normPos.x * 2 - 1;
+    var ndcY = -(normPos.y * 2 - 1);
+    t.raycaster.setFromCamera({ x: ndcX, y: ndcY }, t.camera);
+    var hits = t.raycaster.intersectObjects(t.group.children, false);
+    return hits.length ? hits[0] : null;
+  }
+
+  // The gesture state machine: reconciles this frame's pinch states into
+  // grabs, releases, and two-hand stretch/rotate — run once per frame
+  // before the main displacement loop (which applies any active sculpt).
+  function processGestures() {
+    var t = three;
+    if (!t || !gestureActive) return;
+
+    for (var hi = 0; hi < 2; hi++) {
+      var h = hands[hi];
+      if (!h.present) {
+        // Tracking lost this frame — release safely without a jump: just
+        // drop the reference, don't move anything based on stale data.
+        if (h.grabbedMesh) { highlightMesh(h.grabbedMesh, false); releaseGrab(h); }
+        if (h.sculptMesh) { highlightMesh(h.sculptMesh, false); endSculpt(h); }
+        continue;
+      }
+      if (h.pinchStart) {
+        var hit = raycastFromNormalized(h.pos);
+        if (hit) {
+          if (gestureMode === 'move') {
+            h.grabbedMesh = hit.object;
+            h.grabOffset = hit.object.position.clone().sub(hit.point);
+            h.grabDistance = hit.distance;
+            highlightMesh(hit.object, true);
+            setGestureStatus('Grabbed shape' + (hands[0].grabbedMesh && hands[1].grabbedMesh && hands[0].grabbedMesh === hands[1].grabbedMesh ? ' — two hands: stretch/rotate.' : '.'));
+          } else {
+            h.sculptMesh = hit.object;
+            h.sculptLocalPoint = hit.object.worldToLocal(hit.point.clone());
+            h.sculptStartDepth = hit.distance;
+            h.currentPull = 0;
+            highlightMesh(hit.object, true);
+            setGestureStatus('Sculpting — drag to pull a bulge.');
+          }
+        }
+      }
+      if (h.pinchEnd) {
+        if (h.grabbedMesh) { highlightMesh(h.grabbedMesh, false); releaseGrab(h); setGestureStatus('Released.'); }
+        if (h.sculptMesh) { highlightMesh(h.sculptMesh, false); endSculpt(h); setGestureStatus('Released — easing back per Elasticity.'); }
+      }
+    }
+
+    var bothGrabSame = gestureMode === 'move' && hands[0].grabbedMesh && hands[1].grabbedMesh && hands[0].grabbedMesh === hands[1].grabbedMesh;
+    if (bothGrabSame) {
+      var mesh = hands[0].grabbedMesh;
+      var p0 = normalizedToWorldAtDistance(hands[0].pos, hands[0].grabDistance);
+      var p1 = normalizedToWorldAtDistance(hands[1].pos, hands[1].grabDistance);
+      if (!mesh.userData.twoHandBase) {
+        mesh.userData.twoHandBase = {
+          dist: Math.max(1, p0.distanceTo(p1)),
+          angle: Math.atan2(p1.y - p0.y, p1.x - p0.x),
+          scale: mesh.userData.baseScale.clone(),
+          rotZ: mesh.rotation.z
+        };
+      }
+      var tb = mesh.userData.twoHandBase;
+      var curDist = p0.distanceTo(p1);
+      var curAngle = Math.atan2(p1.y - p0.y, p1.x - p0.x);
+      var stretch = Math.max(0.3, Math.min(3, curDist / tb.dist));
+      // baseScale feeds into the main render loop's scale, combined there
+      // with the Pulse oscillation rather than overwritten by it.
+      mesh.userData.baseScale.set(tb.scale.x * stretch, tb.scale.y * stretch, tb.scale.z);
+      mesh.rotation.z = tb.rotZ + (curAngle - tb.angle);
+      mesh.position.copy(p0.clone().add(p1).multiplyScalar(0.5));
+    } else {
+      for (var hi2 = 0; hi2 < 2; hi2++) {
+        var h2 = hands[hi2];
+        if (h2.grabbedMesh) {
+          if (h2.grabbedMesh.userData.twoHandBase) h2.grabbedMesh.userData.twoHandBase = null;
+          var wp = normalizedToWorldAtDistance(h2.pos, h2.grabDistance);
+          h2.grabbedMesh.position.copy(wp.add(h2.grabOffset));
+        }
+      }
+    }
+
+    for (var hi3 = 0; hi3 < 2; hi3++) {
+      var h3 = hands[hi3];
+      if (h3.sculptMesh) {
+        var hit3 = raycastFromNormalized(h3.pos);
+        // Moving the pinch toward the camera relative to where sculpting
+        // started reads as "pulling" a bulge out; away reads as pushing in.
+        h3.currentPull = hit3 && hit3.object === h3.sculptMesh
+          ? (h3.sculptStartDepth - hit3.distance)
+          : h3.currentPull; // off the surface: hold the last pull rather than snapping to 0
+      }
+    }
+
+    // pinchStart/pinchEnd are one-frame transients — the MediaPipe path
+    // recomputes them fresh every frame anyway, but the mouse/touch
+    // fallback sets them once per DOM event, so they must be cleared here
+    // or a grab/sculpt would restart every frame.
+    hands[0].pinchStart = hands[0].pinchEnd = false;
+    hands[1].pinchStart = hands[1].pinchEnd = false;
+  }
+
+  // Reads MediaPipe's per-frame hand landmarks (when available) into the
+  // shared `hands[]` state, then runs the gesture state machine. When
+  // MediaPipe isn't loaded, the mouse/touch fallback handlers below write
+  // directly into `hands[]` instead, and this just runs the state machine.
+  function updateHandGestures(now) {
+    if (!gestureActive) return;
+    if (handLandmarker && video.videoWidth) {
+      var result = handLandmarker.detectForVideo(video, now);
+      for (var hi = 0; hi < 2; hi++) {
+        var h = hands[hi];
+        var lm = result && result.landmarks && result.landmarks[hi];
+        if (lm) {
+          var thumb = lm[4], index = lm[8];
+          var rawX = (thumb.x + index.x) / 2;
+          var rawY = (thumb.y + index.y) / 2;
+          if (mirrored) rawX = 1 - rawX;
+          h.pos.x += (rawX - h.pos.x) * 0.5; // smooths jitter without lagging too far behind
+          h.pos.y += (rawY - h.pos.y) * 0.5;
+          var dx = thumb.x - index.x, dy = thumb.y - index.y;
+          var pinchDist = Math.sqrt(dx * dx + dy * dy);
+          var wasPinching = h.pinching;
+          h.present = true;
+          h.pinching = pinchDist < 0.07;
+          h.pinchStart = h.pinching && !wasPinching;
+          h.pinchEnd = !h.pinching && wasPinching;
+        } else {
+          h.pinchEnd = h.pinching;
+          h.pinchStart = false;
+          h.pinching = false;
+          h.present = false;
+        }
+      }
+    }
+    processGestures();
   }
 
   function renderThree(now) {
@@ -925,6 +1221,7 @@
     var t = ensureThree();
     if (!t) return;
     updateAudioLevels();
+    updateHandGestures(now);
     t.texture.needsUpdate = true;
     var deltaSeconds = t.lastTime ? Math.min(0.1, (now - t.lastTime) / 1000) : 0;
     t.lastTime = now;
@@ -988,7 +1285,8 @@
 
       var seed = mesh.userData.noiseSeed;
       var pulseScale = 1 + Math.sin(timeSeconds * 1.6 + seed) * pulseDepth;
-      mesh.scale.setScalar(pulseScale);
+      var bScale = mesh.userData.baseScale;
+      mesh.scale.set(bScale.x * pulseScale, bScale.y * pulseScale, bScale.z * pulseScale);
 
       var base = mesh.userData.basePositions;
       var amount = mesh.userData.noiseAmount * organicAmount * 2.5;
@@ -998,6 +1296,25 @@
       var displacement = mesh.userData.displacement;
       var pos = mesh.geometry.attributes.position;
       var colorAttr = mesh.isPoints ? mesh.geometry.attributes.color : null;
+
+      // Any hand(s) currently sculpting this specific mesh, precomputed
+      // once per mesh (not per vertex): a falloff radius and pull target
+      // in the same world units as the geometry.
+      var sculptDisp = mesh.userData.sculptDisplacement;
+      var sculptDecay = 1 - sculptElasticityPct * 0.08; // 0 elasticity = permanent, 1 = snaps back fast
+      var activeSculptors = null;
+      for (var hsi = 0; hsi < 2; hsi++) {
+        var hs = hands[hsi];
+        if (hs.sculptMesh === mesh && hs.sculptLocalPoint) {
+          if (!activeSculptors) activeSculptors = [];
+          activeSculptors.push({
+            x: hs.sculptLocalPoint.x, y: hs.sculptLocalPoint.y, z: hs.sculptLocalPoint.z,
+            radius: Math.max(1, sculptRadiusPct * depthScale * 2),
+            pullTarget: Math.max(-1, Math.min(1, hs.currentPull / Math.max(1, depthScale))) * sculptStrengthPct * depthScale * 2
+          });
+        }
+      }
+
       for (var v = 0; v < pos.count; v++) {
         var ix = v * 3;
         var bx = base[ix], by = base[ix + 1], bz = base[ix + 2];
@@ -1028,12 +1345,51 @@
           colorAttr.array[ix + 2] = videoDepthData[pidx + 2] / 255;
         }
 
+        // Hand-sculpted bulge: decays every frame per Elasticity, and — if
+        // this vertex is within an active pinch's falloff radius right
+        // now — eases toward the current pull, "clay"-like rather than
+        // snapping. Layered on top of the light-reactive + organic
+        // displacement above, not replacing it.
+        var sculptVal = sculptDisp[v] * sculptDecay;
+        if (activeSculptors) {
+          for (var asi = 0; asi < activeSculptors.length; asi++) {
+            var asc = activeSculptors[asi];
+            var dxs = bx - asc.x, dys = by - asc.y, dzs = bz - asc.z;
+            var ds = Math.sqrt(dxs * dxs + dys * dys + dzs * dzs);
+            if (ds < asc.radius) {
+              var falloff = 1 - ds / asc.radius;
+              falloff = falloff * falloff * (3 - 2 * falloff); // smoothstep: soft elastic-clay edge
+              sculptVal += (falloff * asc.pullTarget - sculptVal) * 0.5;
+            }
+          }
+        }
+        sculptDisp[v] = sculptVal;
+        n += sculptVal;
+
         pos.setXYZ(v, bx + (bx / len) * n, by + (by / len) * n, bz + (bz / len) * n);
       }
       pos.needsUpdate = true;
       if (colorAttr) colorAttr.needsUpdate = true;
       if (!mesh.isPoints) mesh.geometry.computeVertexNormals(); // re-shade the sculpted surface under the lights
     }
+
+    // Pinch-point cursors: visible whenever gesture control is on and that
+    // hand is tracked, filled orange while pinching so a grab/sculpt is
+    // unambiguous, positioned at the shape's depth when interacting with
+    // one, or a comfortable default depth otherwise.
+    for (var hc = 0; hc < 2; hc++) {
+      var hcur = hands[hc], cursor = t.cursors[hc];
+      if (gestureActive && hcur.present) {
+        var cursorDist = hcur.grabDistance || hcur.sculptStartDepth || SHAPE_CAMERA_DISTANCE * 0.6;
+        cursor.position.copy(normalizedToWorldAtDistance(hcur.pos, cursorDist));
+        cursor.material.color.setHex(hcur.pinching ? 0xff5a1f : 0xffffff);
+        cursor.scale.setScalar(hcur.pinching ? 1.4 : 1);
+        cursor.visible = true;
+      } else {
+        cursor.visible = false;
+      }
+    }
+
     t.renderer.render(t.scene, t.camera);
   }
 
@@ -1461,6 +1817,94 @@
     handMoveRangeValue.textContent = handMoveRangeInput.value + '%';
   });
 
+  gestureToggleBtn.addEventListener('click', function () {
+    gestureActive = !gestureActive;
+    gestureToggleBtn.classList.toggle('active', gestureActive);
+    gestureControls.style.display = gestureActive ? 'flex' : 'none';
+    if (gestureActive) {
+      loadHandLandmarker();
+    } else {
+      for (var hi = 0; hi < 2; hi++) {
+        var h = hands[hi];
+        if (h.grabbedMesh) highlightMesh(h.grabbedMesh, false);
+        if (h.sculptMesh) highlightMesh(h.sculptMesh, false);
+        releaseGrab(h);
+        endSculpt(h);
+        h.present = false; h.pinching = false; h.pinchStart = false; h.pinchEnd = false;
+        h._pointerId = null;
+      }
+      setGestureStatus('');
+    }
+  });
+  gestureModeRow.querySelectorAll('button[data-gesture-mode]').forEach(function (btn) {
+    btn.addEventListener('click', function () {
+      gestureModeRow.querySelectorAll('button').forEach(function (b) { b.classList.remove('active'); });
+      btn.classList.add('active');
+      gestureMode = btn.dataset.gestureMode;
+    });
+  });
+  sculptRadiusInput.addEventListener('input', function () {
+    sculptRadiusPct = parseInt(sculptRadiusInput.value, 10) / 100;
+    sculptRadiusValue.textContent = sculptRadiusInput.value;
+  });
+  sculptStrengthInput.addEventListener('input', function () {
+    sculptStrengthPct = parseInt(sculptStrengthInput.value, 10) / 100;
+    sculptStrengthValue.textContent = sculptStrengthInput.value;
+  });
+  sculptElasticityInput.addEventListener('input', function () {
+    sculptElasticityPct = parseInt(sculptElasticityInput.value, 10) / 100;
+    sculptElasticityValue.textContent = sculptElasticityInput.value;
+  });
+  sculptResetBtn.addEventListener('click', function () {
+    if (!three) return;
+    for (var i = 0; i < three.group.children.length; i++) {
+      var mesh = three.group.children[i];
+      mesh.userData.sculptDisplacement.fill(0);
+      mesh.userData.baseScale.set(1, 1, 1);
+      mesh.rotation.z = 0;
+      mesh.userData.twoHandBase = null;
+    }
+    setGestureStatus('Shapes reset.');
+  });
+
+  // Mouse/touch fallback — drives the exact same hands[]/gesture state
+  // machine as MediaPipe, so it only takes over when hand tracking isn't
+  // loaded (or failed to load). A second simultaneous touch becomes "hand
+  // 1", enabling the two-hand gestures without a camera-tracked hand.
+  function pointerToNormalized(clientX, clientY) {
+    var rect = threeCanvas.getBoundingClientRect();
+    return { x: (clientX - rect.left) / rect.width, y: (clientY - rect.top) / rect.height };
+  }
+  threeCanvas.addEventListener('pointerdown', function (e) {
+    if (!gestureActive || handLandmarker) return;
+    var slot = (hands[0].pinching || hands[0].present) ? 1 : 0;
+    var h = hands[slot];
+    h.present = true;
+    h.pinching = true;
+    h.pinchStart = true;
+    h.pos = pointerToNormalized(e.clientX, e.clientY);
+    h._pointerId = e.pointerId;
+  });
+  threeCanvas.addEventListener('pointermove', function (e) {
+    if (!gestureActive || handLandmarker) return;
+    for (var hi = 0; hi < 2; hi++) {
+      if (hands[hi]._pointerId === e.pointerId) hands[hi].pos = pointerToNormalized(e.clientX, e.clientY);
+    }
+  });
+  function endFallbackPointer(e) {
+    if (handLandmarker) return;
+    for (var hi = 0; hi < 2; hi++) {
+      if (hands[hi]._pointerId === e.pointerId) {
+        hands[hi].pinchEnd = true;
+        hands[hi].pinching = false;
+        hands[hi].present = false;
+        hands[hi]._pointerId = null;
+      }
+    }
+  }
+  window.addEventListener('pointerup', endFallbackPointer);
+  window.addEventListener('pointercancel', endFallbackPointer);
+
   function setAudioStatus(text, isError) {
     audioStatus.textContent = text;
     audioStatus.style.color = isError ? '#ff5a1f' : '#888';
@@ -1537,8 +1981,12 @@
 
   // Drag-to-rotate: a pointer drag over the 3D canvas rotates the whole
   // group of shapes, added on top of their continuous auto-rotation.
+  // Deferred to the gesture system when it's using the mouse/touch
+  // fallback (no hand tracking loaded), since that same drag is how you
+  // grab/sculpt an individual shape instead.
   threeCanvas.addEventListener('pointerdown', function (e) {
     if (!shapesActive || !three) return;
+    if (gestureActive && !handLandmarker) return;
     three.drag.active = true;
     three.drag.x = e.clientX;
     three.drag.y = e.clientY;
